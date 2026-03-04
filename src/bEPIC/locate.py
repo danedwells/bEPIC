@@ -5,9 +5,11 @@ Created on Wed Sep 14 11:55:10 2022
 
 @author: amy
 """
+import numpy as np
+import pandas as pd
 
 def get_two_station_location(sta_df):
-    import numpy as np
+
     station_01_idx = np.where(sta_df['order']==1)[0][0]
     station_01_lon = sta_df['longitude'].iloc[station_01_idx]
     station_01_lat = sta_df['latitude'].iloc[station_01_idx]

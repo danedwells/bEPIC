@@ -5,9 +5,12 @@ Created on Wed Sep 14 11:59:27 2022
 
 @author: amy
 """
+import numpy as np
+from obspy.geodetics import gps2dist_azimuth
+from math import radians, sin, cos, pi
+
 
 def make_grid(CenterPoint,GridSize=200,GridSpacing=2):
-    import numpy as np
 
     grid_inc = np.arange(GridSpacing, GridSize + GridSpacing, GridSpacing)
     grid_x = np.hstack((grid_inc[::-1]*-1,0,grid_inc))
@@ -24,23 +27,22 @@ def make_grid(CenterPoint,GridSize=200,GridSpacing=2):
 
 
 def ckm2LLd(xx,yy,lon0,lat0,rot):
-      import numpy as np
       # convert cartesian to lon lat
       # and rotate if wanted
       R = 6378137
       ff = 1/298.257
       r = R*(1-ff*np.sin(lat0* np.pi / 180.)**2) # r - radius at lat [m]
 
-      mpd = r*np.pi/180;
+      mpd = r*np.pi/180
       cos_rot = np.cos(rot* np.pi / 180.);        # cos_rot - cos of rotation angle
       sin_rot = np.sin(rot* np.pi / 180.);        # sin_rot - sin of rotation angle
 
       if len(xx)==len(yy):
-             x_rot = xx*cos_rot + yy*sin_rot;
-             y_rot =-xx*sin_rot + yy*cos_rot;
+             x_rot = xx*cos_rot + yy*sin_rot
+             y_rot =-xx*sin_rot + yy*cos_rot
              # transform from xx,yy to lon,lat using (lon0,lat0) as origin
-             lat = lat0 + y_rot/mpd;
-             lon = lon0 + x_rot/mpd/np.cos(lat0* np.pi / 180.);
+             lat = lat0 + y_rot/mpd
+             lon = lon0 + x_rot/mpd/np.cos(lat0* np.pi / 180.)
       else:
           print('xx and yy are not consistent!')
       return[lon,lat]
@@ -64,8 +66,6 @@ def LL2cartd(lon,lat,lon0,lat0,rot):
     modified by Lujia Feng, 2008
     translated to python by Amy Williamson, 2018
     last modified by ALW on July 27 2018 """
-    from math import radians, sin, cos, pi
-    import numpy as np
 
 
     R = 6378137          # R - Earth's radius at the equator [m]
@@ -91,7 +91,7 @@ def LL2cartd(lon,lat,lon0,lat0,rot):
 
 
 def get_dist_between_two_points_km(lon1,lat1,lon2,lat2):
-    from obspy.geodetics import gps2dist_azimuth
+
     
     m,az1,az2 = gps2dist_azimuth(lat1, lon1, lat2, lon2)
     d = m/1000
