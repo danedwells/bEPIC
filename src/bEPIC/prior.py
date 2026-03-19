@@ -15,8 +15,8 @@ import numpy as np
 from bEPIC import geospatial_util
 import os
 from datetime import datetime
-bepic=os.environ['BEPIC']
-
+#bepic=os.environ['BEPIC']
+bepic = "/home/daned/2024_NEHRP/bEPIC"
 
 
 def generate_prior_seismicity_catalog():
@@ -26,8 +26,7 @@ def generate_prior_seismicity_catalog():
     Returns:
     
     """
-    
-    bepic=os.environ['BEPIC']
+
     region = [-135, -112, 30, 50]
     earthquake = search(starttime=datetime(2000, 1, 1, 0, 0), endtime=datetime.now(),minlatitude=region[2], 
                         maxlatitude=region[3], minlongitude=region[0], maxlongitude=region[1],

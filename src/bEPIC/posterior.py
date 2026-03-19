@@ -8,6 +8,25 @@ Created on Wed Sep 14 14:57:47 2022
 
 
 def compute_posterior(CenterPoint,GridSize,GridSpacing,prior_function,likelihood_function):
+    """
+    Computes the posterior location function with appropriate normalization demoninator (k)
+    Uses np.trapz to integrate over x and y coordinates
+
+    Args:
+    ---------------
+    CenterPoint: 
+    GridSize
+    GridSpacing
+    prior_function
+    likelihood_function
+
+    Returns:
+    ---------------
+    post
+    posterior_lon
+    posterior_lat
+    
+    """
 
     from bEPIC import geospatial_util
     import numpy as np

@@ -7,9 +7,9 @@ Created on Wed Sep 14 16:49:31 2022
 """
 import sys
 import os
-import shutil
-import gzip
-import urllib.request
+import shutil # higher level version of os. Caution: can delete entire directories without issue.
+import gzip # python library for interacting with gzip files (GNU compression software)
+import urllib.request # Python library for opening and reading URLs
 from bEPIC import data_util
 
 #-------------------------------------------------------------#

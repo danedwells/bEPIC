@@ -13,7 +13,7 @@ import os
 import shutil
 import numpy as np
 import pandas as pd
-bepic=os.environ['BEPIC']
+bepic = "/home/daned/2024_NEHRP/bEPIC"
 
 # initialize by seeing if everything is in the correct directory structure and if a .run file
 # exists
