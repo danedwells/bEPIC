@@ -5,15 +5,15 @@ Created on Tue Sep 20 17:35:41 2022
 
 @author: amy
 """
-
+from bEPIC import geospatial_util
+import pandas as pd
+import numpy as np
+import os
 
 
 
 def compute_station_trigger_misfit(postgres_id,project_parent_directory):
-    from bEPIC import geospatial_util
-    import pandas as pd
-    import numpy as np
-    import os
+
     
     
    

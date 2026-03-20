@@ -5,12 +5,13 @@ Created on Wed Sep 14 11:18:41 2022
 
 @author: amy
 """
+import pandas as pd        
+import numpy as np
+from datetime import datetime,timedelta
+from obspy.geodetics import gps2dist_azimuth
 
        
 def generate_run_file(project_parent_directory,postgres_id):
-    import numpy as np
-    import pandas as pd
-    from datetime import datetime
 
     station_trigger_log_file = project_parent_directory+postgres_id+'/EPIC/'+postgres_id+'_event_triggers_log.txt'
     output_filename =  project_parent_directory+postgres_id+'/'+postgres_id+'.run'
@@ -58,11 +59,6 @@ def generate_run_file(project_parent_directory,postgres_id):
     #--------------------------------------------------#    
     
 def search_for_USGS_event(project_parent_directory,postgres_id):
-    import pandas as pd        
-    import numpy as np
-    from datetime import datetime,timedelta
-    from obspy.geodetics import gps2dist_azimuth
-   
     
     
     event_summary_df = pd.read_csv(project_parent_directory+postgres_id+'/EPIC/'+postgres_id+'_event_summary_log.txt',sep='\t')
@@ -70,8 +66,6 @@ def search_for_USGS_event(project_parent_directory,postgres_id):
     dt=0
     dx=0
     found=False
-
-
 
     
     while found == False:

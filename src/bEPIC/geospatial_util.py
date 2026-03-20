@@ -24,8 +24,6 @@ def make_grid(CenterPoint,GridSize=200,GridSpacing=2):
     return(grid_lons,grid_lats,grid_x,grid_x,grid_x_ravel,grid_y_ravel)
 
 
-
-
 def ckm2LLd(xx,yy,lon0,lat0,rot):
       # convert cartesian to lon lat
       # and rotate if wanted
