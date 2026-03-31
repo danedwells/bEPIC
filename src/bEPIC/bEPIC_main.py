@@ -8,7 +8,7 @@ Created on Wed Sep 14 10:15:50 2022
 """
 
 from bEPIC import data_util
-from bEPIC import locate,likelihood,magnitude,prior,posterior
+from bEPIC import locate,likelihood,magnitude,prior,posterior,prior_file
 import os
 import shutil
 import numpy as np
@@ -82,7 +82,8 @@ def initialize_bEPIC_event(project_parent_directory, postgres_id):
             print(f' ... USGS search failed: {e}')
 
 
-def run_bEPIC(project_parent_directory, postgres_id, velocity_model, GridSize, GridSpacing):
+def run_bEPIC(project_parent_directory, postgres_id, velocity_model, GridSize, GridSpacing,
+              prior_model=None):
     """
     Main entry point for the bEPIC earthquake location pipeline.
 
@@ -96,16 +97,20 @@ def run_bEPIC(project_parent_directory, postgres_id, velocity_model, GridSize, G
         velocity_model:                 Velocity model passed to the likelihood calculator.
         GridSize (float):               Spatial extent of the search grid.
         GridSpacing (float):            Resolution of the search grid.
+        prior_model (SeismicPrior):     Optional pre-built SeismicPrior (from
+                                        priors.prior_model).  When provided,
+                                        replaces the default ANSS-KDE prior.
     """
 
     # Ensure postgres_id is a zero-padded 6-character string (e.g. 42 -> '000042')
     if type(postgres_id) != str:
         postgres_id = str(postgres_id).zfill(6)
-
+ 
     # Load the .run file — contains per-station arrival time data across all versions
     run_df = pd.read_csv(project_parent_directory + postgres_id + '/' + postgres_id + '.run')
     run_df['sigma'] = np.ones(len(run_df))  # initialize uncertainty weights to 1
-
+    print("RUN_DF: ")
+    run_df.head(5)
     # ---------------------------------------------------------------------------
     # Main loop: iterate over each version (each represents a new station coming online)
     # ---------------------------------------------------------------------------
@@ -146,9 +151,13 @@ def run_bEPIC(project_parent_directory, postgres_id, velocity_model, GridSize, G
              likelihood_lon, likelihood_lat) = likelihood.calculate_likelihood(
                 CenterPoint, sta_df, velocity_model, GridSize, GridSpacing)
 
-            # --- Prior: compute the seismicity-based prior probability surface ---
-            prior_function, prior_lon, prior_lat = prior.compute_prior(
-                CenterPoint, GridSize, GridSpacing, ANSS_timestamp=None)
+            # --- Prior: seismicity-based spatial prior ---
+            if prior_model is not None:
+                prior_function, prior_lon, prior_lat = prior_file.compute_prior_from_model(
+                    CenterPoint, GridSize, GridSpacing, prior_model)
+            else:
+                prior_function, prior_lon, prior_lat = prior.compute_prior(
+                    CenterPoint, GridSize, GridSpacing, ANSS_timestamp=None)
 
             # --- Posterior: combine likelihood and prior to get the best location estimate ---
             post, posterior_lon, posterior_lat = posterior.compute_posterior(

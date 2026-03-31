@@ -34,7 +34,7 @@ def compute_posterior(CenterPoint,GridSize,GridSpacing,prior_function,likelihood
     (grid_lons,grid_lats,grid_x,grid_y,
      grid_x_ravel,grid_y_ravel) = geospatial_util.make_grid(CenterPoint,GridSize,GridSpacing)
 
-    k = np.trapz(np.trapz(prior_function*likelihood_function,grid_x,axis=0),grid_y)
+    k = np.trapezoid(np.trapezoid(prior_function*likelihood_function,grid_x,axis=0),grid_y)
     post = (1/k)*likelihood_function*prior_function
      
      

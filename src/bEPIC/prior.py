@@ -5,8 +5,8 @@ Created on Wed Sep 14 14:02:35 2022
 
 @author: amy
 """
-from libcomcat.search import search
 from datetime import datetime
+from bEPIC import catalog_fetch
 import pandas as pd
 import os
 from scipy.stats import kde
@@ -15,30 +15,12 @@ import numpy as np
 from bEPIC import geospatial_util
 import os
 from datetime import datetime
-#bepic=os.environ['BEPIC']
-bepic = "/home/daned/2024_NEHRP/bEPIC"
+bepic = os.path.dirname(os.path.abspath(__file__))
+#bepic = "/home/daned/2024_NEHRP/bEPIC"
 
 
 def generate_prior_seismicity_catalog():
-    """
-    Args:
-
-    Returns:
-    
-    """
-
-    region = [-135, -112, 30, 50]
-    earthquake = search(starttime=datetime(2000, 1, 1, 0, 0), endtime=datetime.now(),minlatitude=region[2], 
-                        maxlatitude=region[3], minlongitude=region[0], maxlongitude=region[1],
-                        minmagnitude=3)
-    
-    columns=['ANSS ID','date','timestamp','lon','lat','depth','mag']
-    df = pd.DataFrame(columns=columns)
-    for eq in earthquake:
-        df.loc[len(df.index)] = [eq.id,str(eq.time),eq.time.timestamp(),eq.longitude,eq.latitude,eq.depth,eq.magnitude]
-    
-
-    df.to_csv(bepic+'/data/prior_seismicity_catalog.txt',sep='\t',index=False) 
+    catalog_fetch.generate_prior_seismicity_catalog()
     
     
 
@@ -101,7 +83,6 @@ def compute_prior(CenterPoint,GridSize,GridSpacing,ANSS_timestamp=None):
     k._data_covariance = np.identity(2) * spread
     k._data_inv_cov    = np.linalg.inv(k._data_covariance)
     k.covariance       = k._data_covariance * k.factor**2
-    k.inv_cov          = k._data_inv_cov / k.factor**2
 
     # Evaluate the KDE on the full grid to produce a 2D seismicity density map
     xi, yi = np.mgrid[np.min(grid_x):np.max(grid_x):len(grid_x)*1j,

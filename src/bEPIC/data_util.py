@@ -123,7 +123,7 @@ def travel_time_function(velocity_model):
     import os
     
     
-    bepic=os.environ['BEPIC']
+    bepic = os.path.dirname(os.path.abspath(__file__))
     tt_file = bepic+'/data/h2p+ak135.080'
     
     tt_mod = np.genfromtxt(tt_file,skip_header=1)
@@ -139,7 +139,7 @@ def parse_log(project_parent_directory,log_file,event_id,epic_id):
     import pandas as pd
 
     
-    bepic=os.environ['BEPIC']
+    bepic = os.path.dirname(os.path.abspath(__file__))
     
     
     print('paring event long for epic event id '+epic_id)

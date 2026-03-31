@@ -16,7 +16,7 @@ from bEPIC import data_util
 # VARIABLE 1 needs to be instance
 # VARIABLE 2 needs to be day
 # VARIABLE 2 needs to be postges_d
-bepic=os.environ['BEPIC']
+bepic = os.path.dirname(os.path.abspath(__file__))
 
 
 
