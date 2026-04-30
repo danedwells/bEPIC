@@ -173,6 +173,8 @@ class EPIC_PARAMS:
     def __init__(self):
         self.MAX_EVENT_TRIGS = 100
         self.LocationPVelocity = 6.0
+        self.migrate_grid = True              # if True, re-centre the search grid on the posterior MAP after each version
+        self.migrate_grid_min_triggers = 1   # only migrate once this many triggers have been reached
         
         
 
@@ -249,9 +251,12 @@ def E2Location_locate(params,event):
               +'\t'+str(np.round(trigs[i].tt,2)))
     print('# --------------------------------------------------------')
 
-    # Update event location to posterior estimate so the next version's grid is centred there
-    event.lat = evlat
-    event.lon = evlon
+    # Optionally re-centre the search grid on the posterior MAP for the next version.
+    # Migration is suppressed until migrate_grid_min_triggers stations have reported.
+    if (getattr(params, 'migrate_grid', True) and
+            num_trigs >= getattr(params, 'migrate_grid_min_triggers', 1)):
+        event.lat = evlat
+        event.lon = evlon
 
     return(t,output_df)
         
@@ -300,7 +305,9 @@ def E2Location_searchGrid(event, trigs, params):
     # velocity model
     vel_mod_filename = f'{bepic}/data/h2p+ak135.080'
     tt_mod = np.genfromtxt(vel_mod_filename, skip_header=1)
-    ttf = interpolate.interp1d(tt_mod[:,0], tt_mod[:,1])
+    ttf = interpolate.interp1d(tt_mod[:,0], tt_mod[:,1],
+                               bounds_error=False,
+                               fill_value=(tt_mod[0,1], tt_mod[-1,1]))
 
 
     lat0  = evlat;       

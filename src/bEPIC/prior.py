@@ -27,6 +27,10 @@ def generate_prior_seismicity_catalog():
 def compute_prior(CenterPoint,GridSize,GridSpacing,ANSS_timestamp=None):
     """
     Compute the seismic prior, which is basically just a smoothed map of seismicity
+    unlike prior_file.py/compute_prior_from_model(), this takes a 
+    seismicity map and smooths it based on supplied centerpoint,
+    gridsize, and spacing. It does not perform interpolation
+    onto an arbitrary grid spacing.
 
     Args:
     CenterPoint: List of [float, float]

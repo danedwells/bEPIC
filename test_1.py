@@ -8,7 +8,7 @@ from bEPIC import bEPIC_main
 
 #%%
 
-postgres_id = '9999'  # References some database (SQL) 
+postgres_id = '126625'  # References some database (SQL) 
 
 
 #postgres_id = 126625
@@ -18,7 +18,7 @@ init=1
 run=1
 #--------------------------------------#
 # run variables
-project_parent_directory = '.'
+project_parent_directory = './'
 
 
 velocity_model = 'h2p+ak135'   # 'constant
@@ -34,3 +34,5 @@ if init ==1:
 if run ==1:
     bEPIC_main.run_bEPIC(project_parent_directory,postgres_id,velocity_model,GridSize,GridSpacing)
 
+
+# %%

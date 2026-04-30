@@ -1,3 +1,4 @@
+#%%
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -6,23 +7,36 @@ Created on Mon Mar 16 11:39:24 2026
 @author: amy
 """
 
-import EPIC_locate_prelim
+from bEPIC import EPIC_locate_prelim
+from priors.prior_model import SeismicPrior
+import os
 
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+#%%
+
+"""
+FileNames for prior:
+--------------------------------------------------------
+USGS_NSHM_prior.tt3
+helmstetter_prior.tt3
+GEAR1_prior.tt3
+
+
+"""
 
 #   set up params
 params = EPIC_locate_prelim.EPIC_PARAMS()
-params.PriorGridFile =  '/Users/amy/projects/container_bEPIC/data/prior_seis_grid_US_Canada.tt3'
+params.PriorGridFile =  os.path.join(SeismicPrior.data_dir, 'USGS_NSHM_prior.tt3')
 params.use_prior = True
 params.GridSize = 25
 params.GridKm = 50
 params.method = 'EPIC C'  
 
-
+#%%
 
 
 # set up starting event info
-
-
 # this code assumes that I am inputting an event, so need to populate my event class
 # with dummy values
 
@@ -66,3 +80,5 @@ event.trigs.append(t)
 
 t,output_df = EPIC_locate_prelim.E2Location_locate(params,event)
 
+
+# %%

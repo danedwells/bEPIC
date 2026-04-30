@@ -252,7 +252,7 @@ if __name__ == "__main__":
     parser.add_argument("--run", action="store_true",
                         help="Run EPIC locate after downloading (requires prior grid file)")
     parser.add_argument("--prior-grid",
-                        default="/Users/amy/projects/container_bEPIC/data/prior_seis_grid_US_Canada.tt3",
+                        default="/home/daned/2024_NEHRP/bEPIC/Zextra/prior_seis_grid_US_Canada.tt3",
                         help="Path to prior grid file (needed with --run)")
     args = parser.parse_args()
 

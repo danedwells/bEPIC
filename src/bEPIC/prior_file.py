@@ -21,6 +21,9 @@ from bEPIC import geospatial_util
 def compute_prior_from_model(CenterPoint, GridSize, GridSpacing, prior_model):
     """
     Evaluate a SeismicPrior on the bEPIC spatial grid.
+    Unlike prior.py/compute_prior(), this takes a precomputed grid
+    and simply interpolates it to match other grid spacings.
+    It also normalizes it.
 
     Parameters
     ----------
