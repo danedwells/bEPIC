@@ -175,6 +175,9 @@ class EPIC_PARAMS:
         self.LocationPVelocity = 6.0
         self.migrate_grid = True              # if True, re-centre the search grid on the posterior MAP after each version
         self.migrate_grid_min_triggers = 1   # only migrate once this many triggers have been reached
+        self.station_inventory       = None  # DataFrame with columns: station, network, longitude, latitude
+                                             # None disables the activity mask (default, fully backward-compatible)
+        self.activity_mask_threshold = 0.30  # fraction of triggered/(triggered+untriggered) above which αm=1
         
         
 
@@ -482,8 +485,54 @@ def E2Location_searchGrid(event, trigs, params):
             I = np.clip(np.round((XLON - _prior_xlower) / _prior_dx).astype(int), 0, _prior_mx - 1)
             PRIOR_GRID = prior_info.grid[J, I]
 
+        # Activity mask αm  shape: (grid_width, grid_width)
+        # Distances are computed fresh in km (from lon/lat) so the mask is
+        # geometrically correct regardless of the stax/stay coordinate scale.
+        ACTIVITY_MASK = np.ones((grid_width, grid_width))
+        if getattr(params, 'station_inventory', None) is not None:
+            inv = params.station_inventory
+            threshold = getattr(params, 'activity_mask_threshold', 0.30)
+
+            triggered_set = {(trigs[it].sta, trigs[it].net) for it in range(num_trigs)}
+            untrig_mask = np.array(
+                [(s, n) not in triggered_set
+                 for s, n in zip(inv['station'].values, inv['network'].values)]
+            )
+            utrig_lons = inv['longitude'].values[untrig_mask]
+            utrig_lats = inv['latitude'].values[untrig_mask]
+
+            if len(utrig_lons) > 0:
+                # Triggered station coordinates in km from the grid origin
+                trig_lons_arr = np.array([trigs[it].lon for it in range(num_trigs)])
+                trig_lats_arr = np.array([trigs[it].lat for it in range(num_trigs)])
+                trig_x_km = (trig_lons_arr - lon0) * f    # f in km/deg
+                trig_y_km = (trig_lats_arr - lat0) * mpd  # mpd in km/deg
+
+                # Untriggered station coordinates in km
+                utrig_x_km = (utrig_lons - lon0) * f
+                utrig_y_km = (utrig_lats - lat0) * mpd
+
+                # Distance: grid node → triggered stations (km)
+                # Shape: (grid_width, grid_width, num_trigs)
+                DX_TRIG = trig_x_km - XKM[:, :, np.newaxis]
+                DY_TRIG = trig_y_km - YKM[:, :, np.newaxis]
+                DIST_TRIG_KM = np.sqrt(DX_TRIG**2 + DY_TRIG**2)
+
+                # Distance: grid node → untriggered stations (km)
+                # Shape: (grid_width, grid_width, n_utrig)
+                DX_UTRIG = utrig_x_km - XKM[:, :, np.newaxis]
+                DY_UTRIG = utrig_y_km - YKM[:, :, np.newaxis]
+                DIST_UNTRIG_KM = np.sqrt(DX_UTRIG**2 + DY_UTRIG**2)
+
+                # R per node = km distance to farthest triggered station
+                R_MAX_KM = DIST_TRIG_KM.max(axis=2)
+
+                N_UNTRIG_INSIDE = (DIST_UNTRIG_KM <= R_MAX_KM[:, :, np.newaxis]).sum(axis=2)
+                FRAC = num_trigs / (num_trigs + N_UNTRIG_INSIDE)
+                ACTIVITY_MASK = (FRAC > threshold).astype(float)
+
         # Posterior  shape: (grid_width, grid_width)
-        POST = LIKE * PRIOR_GRID
+        POST = LIKE * PRIOR_GRID * ACTIVITY_MASK
 
         # Best location
         by, bx = np.unravel_index(np.argmax(POST), POST.shape)
@@ -503,16 +552,17 @@ def E2Location_searchGrid(event, trigs, params):
 
         # Output DataFrame built from arrays (not row-by-row)
         output_df = pd.DataFrame({
-            'y':         YY.ravel(),
-            'x':         XX.ravel(),
-            'lat':       YLAT.ravel(),
-            'lon':       XLON.ravel(),
-            'like':      LIKE.ravel(),
-            'prior':     PRIOR_GRID.ravel(),
-            'post':      POST.ravel(),
-            'misfitrms': MISFITSQ.ravel(),
-            'misfitave': MISFIT_AVE.ravel(),
-            'misfitfrac': FRAC_MISFIT.ravel(),
+            'y':             YY.ravel(),
+            'x':             XX.ravel(),
+            'lat':           YLAT.ravel(),
+            'lon':           XLON.ravel(),
+            'like':          LIKE.ravel(),
+            'prior':         PRIOR_GRID.ravel(),
+            'activity_mask': ACTIVITY_MASK.ravel(),
+            'post':          POST.ravel(),
+            'misfitrms':     MISFITSQ.ravel(),
+            'misfitave':     MISFIT_AVE.ravel(),
+            'misfitfrac':    FRAC_MISFIT.ravel(),
         })
                     
     
