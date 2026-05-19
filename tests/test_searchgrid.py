@@ -273,7 +273,13 @@ def test_best_location_scalars_match_with_prior():
 
 
 # ---------------------------------------------------------------------------
-# Activity mask tests
+# Activity eligibility tests (post-location check at MAP epicenter)
+# ---------------------------------------------------------------------------
+# The operational EPIC criterion: at least `activity_threshold` (default 0.40)
+# of the stations inside the radius of the farthest triggered station must be
+# triggered.  The check runs once, at the MAP location, after the posterior is
+# maximised.  It does not alter POST values — it only sets activity_eligible
+# and activity_frac on SearchOut (and as constant columns in output_df).
 # ---------------------------------------------------------------------------
 
 def _inventory_df(rows):
@@ -281,145 +287,93 @@ def _inventory_df(rows):
     return pd.DataFrame(rows, columns=['longitude', 'latitude', 'station', 'network'])
 
 
-def _params_with_inventory(inv_df, threshold=0.30):
-    """Return a minimal EPIC_PARAMS with an activity mask inventory attached."""
-    params = EPIC_PARAMS()
-    params.prior                   = _MockPrior(uniform=True)
-    params.use_prior               = False
-    params.GridSize                = 5     # 11×11 grid, ±10 km
-    params.GridKm                  = 10
-    params.method                  = 'EPIC C'
-    params.MAX_EVENT_TRIGS         = 10
-    params.station_inventory       = inv_df
-    params.activity_mask_threshold = threshold
-    return params
-
-
-def _single_trig_event():
-    """One triggered station (SAO/BK) at the event epicentre."""
-    event = Event(
-        lat=36.764, lon=-121.4472, time=1538771380.09,
-        misfit_rms=0, misfit_ave=0, eventid=999, version=0,
-    )
-    trig = TriggerManager(
-        lon=-121.4472, lat=36.764, trigger_time=1538771380.09,
-        sta='SAO', net='BK', chan='HNZ',
-    )
-    event.trigs = [trig]
-    event = latLonToXY(event)
-    return event, [trig]
-
-
-def test_no_inventory_mask_column_is_ones():
-    """With station_inventory=None the output_df must contain an all-ones activity_mask."""
+def test_no_inventory_activity_defaults_eligible():
+    """station_inventory=None → activity_eligible=True, activity_frac=nan, columns present."""
     event, trigs, params = _make_event_and_trigs(use_prior=False)
-    # station_inventory is None by default in EPIC_PARAMS
-    _, df = _ep.E2Location_searchGrid(event, trigs, params)
-    assert 'activity_mask' in df.columns
-    assert (df['activity_mask'] == 1.0).all()
+    t, df = _ep.E2Location_searchGrid(event, trigs, params)
+    assert t.activity_eligible is True
+    assert np.isnan(t.activity_frac)
+    assert 'activity_eligible' in df.columns
+    assert 'activity_frac' in df.columns
+    assert df['activity_eligible'].all()
+    assert df['activity_frac'].isna().all()
 
 
-def test_inventory_triggered_only_mask_is_ones():
-    """Inventory = triggered stations only → no untriggered → all-ones mask."""
-    event, trigs, _ = _make_event_and_trigs(use_prior=False)
+def test_triggered_only_inventory_is_eligible():
+    """Inventory = triggered stations only → no untriggered → FRAC=1.0 → eligible."""
+    event, trigs, params = _make_event_and_trigs(use_prior=False)
     rows = [(t.lon, t.lat, t.sta, t.net) for t in trigs]
-    inv = _inventory_df(rows)
-    params = _params_with_inventory(inv)
-    _, df = _ep.E2Location_searchGrid(event, trigs, params)
-    assert 'activity_mask' in df.columns
-    assert (df['activity_mask'] == 1.0).all()
+    params.station_inventory  = _inventory_df(rows)
+    params.activity_threshold = 0.40
+    t, df = _ep.E2Location_searchGrid(event, trigs, params)
+    assert t.activity_eligible is True
+    assert t.activity_frac == 1.0
 
 
-def test_dense_untriggered_masks_far_nodes():
+def test_dense_untriggered_makes_ineligible():
     """
-    Ten untriggered stations strung eastward from the epicentre should mask
-    the eastern grid nodes but leave the centre and western nodes active.
+    Many untriggered stations within R_MAX → FRAC < 0.40 → ineligible.
 
-    Setup: 1 triggered station at the event centre; 10 untriggered stations at
-    Δlon = +0.01°, +0.02°, …, +0.10° (≈ 0.9, 1.8, …, 9.0 km to the east).
-
-    Eastern edge node (XKM = +10 km):
-      R_MAX = 10 km (distance to the single triggered station).
-      All 10 untriggered stations lie within 10 km of this node.
-      FRAC = 1 / 11 ≈ 0.09 < threshold → masked.
-
-    Centre node (XKM = 0):
-      R_MAX = 0 (triggered station is co-located with this node).
-      No untriggered station lies within 0 km → FRAC = 1.0 → active.
-
-    Western edge node (XKM = −10 km):
-      R_MAX = 10 km, but all untriggered stations are ≥ 10.9 km away
-      (east of centre) → none inside → FRAC = 1.0 → active.
+    Setup: 5 triggers (num_trigs=5); 10 untriggered stations within ~9 km of
+    the event centre.  R_MAX ≈ 31 km (distance from MAP to PACP, the farthest
+    triggered station).  FRAC = 5 / (5 + 10) ≈ 0.33 < 0.40.
     """
-    event, trigs = _single_trig_event()
-
+    event, trigs, params = _make_event_and_trigs(use_prior=False)
+    trig_rows  = [(t.lon, t.lat, t.sta, t.net) for t in trigs]
     utrig_rows = [(-121.4472 + 0.01 * k, 36.764, f'U{k:02d}', 'XX')
                   for k in range(1, 11)]
-    inv = _inventory_df([(-121.4472, 36.764, 'SAO', 'BK')] + utrig_rows)
-    params = _params_with_inventory(inv)
-
-    _, df = _ep.E2Location_searchGrid(event, trigs, params)
-    assert 'activity_mask' in df.columns
-
-    centre = df[(df['x'] == 0.0) & (df['y'] == 0.0)]
-    assert centre['activity_mask'].values[0] == 1.0, "Centre node should be active"
-
-    east_edge = df[(df['x'] == 5.0) & (df['y'] == 0.0)]
-    assert east_edge['activity_mask'].values[0] == 0.0, "Eastern edge node should be masked"
-
-    west_edge = df[(df['x'] == -5.0) & (df['y'] == 0.0)]
-    assert west_edge['activity_mask'].values[0] == 1.0, "Western edge node should be active"
+    params.station_inventory  = _inventory_df(trig_rows + utrig_rows)
+    params.activity_threshold = 0.40
+    t, df = _ep.E2Location_searchGrid(event, trigs, params)
+    assert t.activity_eligible is False
+    assert t.activity_frac < 0.40
 
 
-def test_station_network_matching():
+def test_sparse_untriggered_stays_eligible():
+    """Two untriggered stations within R_MAX → FRAC = 5/7 ≈ 0.71 > 0.40 → eligible."""
+    event, trigs, params = _make_event_and_trigs(use_prior=False)
+    trig_rows  = [(t.lon, t.lat, t.sta, t.net) for t in trigs]
+    utrig_rows = [(-121.4472 + 0.01, 36.764, 'U01', 'XX'),
+                  (-121.4472 + 0.02, 36.764, 'U02', 'XX')]
+    params.station_inventory  = _inventory_df(trig_rows + utrig_rows)
+    params.activity_threshold = 0.40
+    t, df = _ep.E2Location_searchGrid(event, trigs, params)
+    assert t.activity_eligible is True
+    assert t.activity_frac > 0.40
+
+
+def test_station_network_matching_for_activity():
     """
-    A station at the same coordinates as a triggered station but with a
-    different (station, network) code must be treated as untriggered.
-    Coordinate-based matching would incorrectly exclude it.
+    Station with same coordinates but different (sta, net) code must be counted
+    as untriggered — coordinate-based matching would incorrectly exclude it.
+    10 same-location, different-code stations → FRAC = 5/15 < 0.40 → ineligible.
     """
-    event, trigs = _single_trig_event()
-
-    # SAO/BK is triggered. DXX/XX is at the exact same location but a
-    # different code — it must count as untriggered.
-    # Add 10 such duplicates so fraction drops below 0.30 at edge nodes.
-    rows = [(-121.4472, 36.764, 'SAO', 'BK')]
-    rows += [(-121.4472, 36.764, f'D{i:02d}', 'XX') for i in range(10)]
-    inv = _inventory_df(rows)
-    params = _params_with_inventory(inv)
-
-    _, df = _ep.E2Location_searchGrid(event, trigs, params)
-    assert 'activity_mask' in df.columns
-    # Edge nodes (R_MAX > 0) should be masked because 10 untriggered stations
-    # co-located with the triggered station lie within every non-zero radius.
-    edge_nodes = df[df['x'].abs() == 5.0]
-    assert (edge_nodes['activity_mask'] == 0.0).all(), (
-        "Edge nodes should be masked when untriggered stations fill the circle"
-    )
+    event, trigs, params = _make_event_and_trigs(use_prior=False)
+    trig_rows = [(t.lon, t.lat, t.sta, t.net) for t in trigs]
+    fake_rows = [(-121.4472, 36.764, f'FAKE{k:02d}', 'ZZ') for k in range(10)]
+    params.station_inventory  = _inventory_df(trig_rows + fake_rows)
+    params.activity_threshold = 0.40
+    t, df = _ep.E2Location_searchGrid(event, trigs, params)
+    assert t.activity_eligible is False
 
 
-def test_mask_zeroes_posterior_and_preserves_unmasked():
+def test_post_unaffected_by_activity_check():
     """
-    Masked nodes (αm=0) must have post=0; active nodes must have
-    post = like (since use_prior=False → prior=1 everywhere).
+    Activity check runs after MAP selection and must not alter POST values.
+    POST = LIKE * PRIOR regardless of eligibility outcome.
     """
-    event, trigs = _single_trig_event()
+    event, trigs, params_base = _make_event_and_trigs(use_prior=False)
+    _, df_no_inv = _ep.E2Location_searchGrid(event, trigs, params_base)
 
+    event, trigs, params_inv = _make_event_and_trigs(use_prior=False)
+    trig_rows  = [(t.lon, t.lat, t.sta, t.net) for t in trigs]
     utrig_rows = [(-121.4472 + 0.01 * k, 36.764, f'U{k:02d}', 'XX')
                   for k in range(1, 11)]
-    inv = _inventory_df([(-121.4472, 36.764, 'SAO', 'BK')] + utrig_rows)
-    params = _params_with_inventory(inv)
+    params_inv.station_inventory  = _inventory_df(trig_rows + utrig_rows)
+    params_inv.activity_threshold = 0.40
+    _, df_with_inv = _ep.E2Location_searchGrid(event, trigs, params_inv)
 
-    _, df = _ep.E2Location_searchGrid(event, trigs, params)
-
-    masked = df[df['activity_mask'] == 0.0]
-    assert len(masked) > 0, "Expected at least one masked node"
-    assert (masked['post'] == 0.0).all(), "Masked nodes must have post = 0"
-
-    active = df[df['activity_mask'] == 1.0]
-    assert len(active) > 0, "Expected at least one active node"
-    # use_prior=False → prior=1 → post = like * 1 * 1
-    np.testing.assert_allclose(
-        active['post'].values, active['like'].values,
-        rtol=1e-10,
-        err_msg="Active node post should equal like when use_prior=False",
+    np.testing.assert_array_equal(
+        df_no_inv['post'].values, df_with_inv['post'].values,
+        err_msg="Activity check must not modify POST values",
     )
