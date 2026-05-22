@@ -157,6 +157,13 @@ class SearchOut:
         self.best_location_post = 0
         self.posterior_lon = np.nan
         self.posterior_lat = np.nan
+        self.best_location_like = 0
+        self.like_lon = np.nan
+        self.like_lat = np.nan
+        self.like_exp_lon = np.nan
+        self.like_exp_lat = np.nan
+        self.exp_lon = np.nan
+        self.exp_lat = np.nan
         self.best_misfit = 0
         self.misfit_ave = 0
         self.best_OT = np.nan
@@ -222,8 +229,16 @@ def E2Location_locate(params,event):
     
     t,output_df = E2Location_searchGrid(event,trigs, params)
     
-    evlon = t.posterior_lon
-    evlat = t.posterior_lat
+    location_type = 'map' # 'map or 'exp'
+    if location_type == 'map':
+        evlon = t.posterior_lon
+        evlat = t.posterior_lat
+
+    elif location_type == 'exp':
+        evlon = t.exp_lon
+        evlat = t.exp_lat
+    else:
+        raise ValueError("var location_type must be one of 'map' or 'exp'")
     
     num_trigs = len(trigs)
     for i in range(num_trigs):
@@ -332,52 +347,7 @@ def E2Location_searchGrid(event, trigs, params):
     grid_y =grid_x = np.linspace(ybeg,yend,2*grid_size + 1)
 
 
-    
-    
-
-    if params.method == 'python bypass':
-        
-        ''' do not use the bypass it is being phased out'''
-        
-        
-        n = len(trigs)              # number of active stations
-        p = len(grid_x)                    # number of grid nodes in x (or y) direction
-        m = p*p                            # total number of grid nodes  (p*p)
-       
-        xx,yy=np.meshgrid(grid_x ,grid_y )
-    
-        
-        prior_val = []
-        for y in grid_y:
-            
-            ykm = y*grid_spacing_km
-            ylat = lat0 + ykm/mpd 
-            
-            if params.use_prior == True:
-                a = (ylat - _prior_ylower)/_prior_dy
-                j = (int)(a+0.5)
-                if(j<0): j=0;
-                if (j >= _prior_my): j = _prior_my - 1
-                
-                
-            for x in grid_x:
-                xkm = x*grid_spacing_km
-                xlon = lon0 +xkm/f
-                if params.use_prior == True:
-                    a = (xlon - _prior_xlower)/_prior_dx
-                    i = (int)(a+0.5)
-                    if (i < 0): i = 0;
-                    if (i >= _prior_mx): i = _prior_mx - 1
-                
-                prior_val = np.append(prior_val,prior_info.grid[j, i])
-    
-    
-        
-    
-    
-    
-    
-    elif params.method == 'EPIC C':
+    if params.method == 'EPIC C':
 
         # ---- original triple-nested loop (preserved for reference) ----
         # output_df = pd.DataFrame(columns=['y','x','lat','lon','like','prior','post','misfitrms','misfitave'])
@@ -478,6 +448,18 @@ def E2Location_searchGrid(event, trigs, params):
 
         # Likelihood  shape: (grid_width, grid_width)
         LIKE = np.sqrt(np.exp(-0.5 * (RESIDUALS**2).sum(axis=2)) / num_trigs)
+        LIKE_floor = 0.01* np.nanmax(LIKE)
+        
+        # Optional - zero-out the likelihood low values (<1% of the max)
+        LIKE[LIKE<LIKE_floor] = 0
+
+        ly, lx = np.unravel_index(np.argmax(LIKE),LIKE.shape)
+
+        t.best_location_like = float(LIKE[ly, lx])
+        t.like_lon = float(XLON[ly, lx])
+        t.like_lat = float(YLAT[ly, lx])
+
+        # TODO - make grid center on expecation or likelihood see how it affect
 
         # Prior  shape: (grid_width, grid_width)
         PRIOR_GRID = np.ones_like(LIKE)
@@ -495,6 +477,19 @@ def E2Location_searchGrid(event, trigs, params):
         t.best_location_post = float(POST[by, bx])
         t.posterior_lon      = float(XLON[by, bx])
         t.posterior_lat      = float(YLAT[by, bx])
+
+        _post_sum = POST.sum()
+        POST_norm = POST / _post_sum
+        _like_sum = LIKE.sum()
+        LIKE_norm = LIKE / _like_sum()
+
+        # Expectation (center of probability mass)
+        t.exp_lon = float(np.sum(XLON * POST_norm) )#/ _post_sum)
+        t.exp_lat = float(np.sum(YLAT * POST_norm) )# / _post_sum)
+
+        t.like_exp_lon = float(np.sum(XLON * LIKE_norm))
+        t.like_exp_lat = float(np.sum(YLAT * LIKE_norm))
+        
         t.best_misfit        = float(MISFITSQ[by, bx])
         t.misfit_ave         = float(MISFIT_AVE[by, bx])
         t.best_OT            = float(AVEOT[by, bx])
