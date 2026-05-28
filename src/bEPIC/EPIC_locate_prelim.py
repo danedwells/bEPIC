@@ -186,6 +186,8 @@ class EPIC_PARAMS:
         self.station_inventory  = None  # DataFrame with columns: station, network, longitude, latitude
                                         # None disables the activity check (default, fully backward-compatible)
         self.activity_threshold = 0.40  # min fraction triggered/(triggered+total inside R) to pass eligibility
+        self.prev_posterior_lat = None  # posterior lat from previous version; None on first version
+        self.prev_posterior_lon = None  # posterior lon from previous version; None on first version
         
         
 
@@ -207,6 +209,7 @@ def E2Location_locate(params,event):
     evlat  = event.lat                   # I think this is just to save the old location
     evlon  = event.lon
     evtime = event.time
+    evdepth = event.depth
 
 
    
@@ -295,14 +298,18 @@ def E2Location_searchGrid(event, trigs, params):
     evlat  = event.lat                   # I think this is just to save the old location
     evlon  = event.lon
     evtime = event.time
+    evdepth = event.depth
     
    
     num_trigs = min(len(trigs), params.MAX_EVENT_TRIGS)
     trigs     = trigs[:num_trigs]
+    print("TRIGS: ",trigs[0].stax)
+    print("TRIGS: ",trigs[0].stay)
 
     trig_ot = np.zeros(num_trigs)
+    stt_arr = np.zeros(num_trigs)
 
-    
+
    #// The location grid is a square with (2*GridSize + 1) grid-points on each side
    #// The grid point separation is (GridKm / GridSize)
     grid_size       = params.GridSize            # // 25
@@ -328,7 +335,6 @@ def E2Location_searchGrid(event, trigs, params):
                                bounds_error=False,
                                fill_value=(tt_mod[0,1], tt_mod[-1,1]))
 
-
     lat0  = evlat;       
     lon0  = evlon
     R     = 6378.137;               
@@ -341,7 +347,6 @@ def E2Location_searchGrid(event, trigs, params):
     j = 0   #// lat index in the prior grid
     i = 0   #// lon index in the prior grid
 
-
     ybeg = -1 *grid_size
     yend = grid_size
     grid_y =grid_x = np.linspace(ybeg,yend,2*grid_size + 1)
@@ -349,16 +354,17 @@ def E2Location_searchGrid(event, trigs, params):
 
     if params.method == 'EPIC C':
 
-        # ---- original triple-nested loop (preserved for reference) ----
+        # #---- original triple-nested loop (preserved for reference) ----
         # output_df = pd.DataFrame(columns=['y','x','lat','lon','like','prior','post','misfitrms','misfitave'])
         # print('grid spacing: '+str(grid_spacing_km))
+        # _frac_misfit_vals = []
         # for y in grid_y:
         #     ykm = y*grid_spacing_km
         #     ylat = lat0 + ykm/mpd
         #     if params.use_prior == True:
         #         a = (ylat - _prior_ylower)/_prior_dy
         #         j = (int)(a+0.5)
-        #         if(j<0): j=0;
+        #         if(j<0): j=0
         #         if (j >= _prior_my): j = _prior_my - 1
         #     for x in grid_x:
         #         xkm = x*grid_spacing_km
@@ -368,8 +374,9 @@ def E2Location_searchGrid(event, trigs, params):
         #             ty   = trigs[it].stay - ykm
         #             dist = np.sqrt(tx*tx + ty*ty)
         #             stt = ttf(dist)
-        #             trig_ot[it] = trigs[it].time - stt;
-        #             sumOT += trig_ot[it];
+        #             stt_arr[it] = stt
+        #             trig_ot[it] = trigs[it].time - stt
+        #             sumOT += trig_ot[it]
         #         aveOT = sumOT/num_trigs
         #         rms   = 0
         #         ttsum = 0
@@ -378,6 +385,7 @@ def E2Location_searchGrid(event, trigs, params):
         #             ttsum += np.fabs(trig_ot[it]-aveOT)
         #         misfitsq = rms/num_trigs
         #         misfit_ave = ttsum/num_trigs
+        #         frac_misfit_val = float(np.nanmean(np.where(stt_arr > 0, np.fabs(trig_ot - aveOT) / stt_arr, np.nan)))
         #         like = 1
         #         for it in range(num_trigs):
         #             tterror = trig_ot[it] - aveOT
@@ -391,11 +399,12 @@ def E2Location_searchGrid(event, trigs, params):
         #         if params.use_prior == True:
         #             a = (xlon - _prior_xlower)/_prior_dx
         #             i = (int)(a+0.5)
-        #             if (i < 0): i = 0;
+        #             if (i < 0): i = 0
         #             if (i >= _prior_mx): i = _prior_mx - 1
         #             Prior = prior_info.grid[j, i]
         #             post = like*Prior
         #         output_df.loc[len(output_df)] = [y,x,ylat,xlon,like,Prior,post,misfitsq,misfit_ave]
+        #         _frac_misfit_vals.append(frac_misfit_val)
         #         if post > t.best_location_post:
         #             t.best_location_post = post
         #             t.posterior_lon = xlon
@@ -408,6 +417,50 @@ def E2Location_searchGrid(event, trigs, params):
         #             t.best_value = post
         #             t.best_like = like
         #             t.best_prior = Prior
+        #             t.frac_misfit = frac_misfit_val
+
+        # t.activity_eligible = True
+        # t.activity_frac = np.nan
+        # _post_arr = output_df['post'].values
+        # _like_arr = output_df['like'].values
+        # _ylat_arr = output_df['lat'].values
+        # _xlon_arr = output_df['lon'].values
+        # _post_sum_v = _post_arr.sum()
+        # _like_sum_v = _like_arr.sum()
+        # t.exp_lon = float(np.sum(_xlon_arr * _post_arr) / _post_sum_v)
+        # t.exp_lat = float(np.sum(_ylat_arr * _post_arr) / _post_sum_v)
+        # t.like_exp_lon = float(np.sum(_xlon_arr * _like_arr) / _like_sum_v)
+        # t.like_exp_lat = float(np.sum(_ylat_arr * _like_arr) / _like_sum_v)
+        # _best_like_idx = int(np.argmax(_like_arr))
+        # t.best_location_like = float(_like_arr[_best_like_idx])
+        # t.like_lon = float(_xlon_arr[_best_like_idx])
+        # t.like_lat = float(_ylat_arr[_best_like_idx])
+        # output_df['misfitfrac'] = _frac_misfit_vals
+        # prior = output_df['prior'].values
+        # POST = output_df['post'].values
+        # MISFITSQ = output_df['misfitrms'].values
+        # MISFIT_AVE = output_df['misfitave'].values
+        # FRAC_MISFIT = output_df['misfitfrac'].values
+        # ylat = output_df['lat'].values
+        # xlon = output_df['lon'].values
+        # like = output_df['like'].values
+        # grid_y = output_df['y'].values
+        # grid_x = output_df['x'].values
+        # # Output DataFrame built from arrays (not row-by-row)
+        # output_df = pd.DataFrame({
+        #     'y':                 grid_y.ravel(),
+        #     'x':                 grid_x.ravel(),
+        #     'lat':               ylat.ravel(),
+        #     'lon':               xlon.ravel(),
+        #     'like':              like.ravel(),
+        #     'prior':             prior.ravel(),
+        #     'activity_eligible': t.activity_eligible,
+        #     'activity_frac':     t.activity_frac,
+        #     'post':              POST.ravel(),
+        #     'misfitrms':         MISFITSQ.ravel(),
+        #     'misfitave':         MISFIT_AVE.ravel(),
+        #     'misfitfrac':        FRAC_MISFIT.ravel(),
+        # })
 
         # ---- vectorized replacement ----
         print('grid spacing: '+str(grid_spacing_km))
@@ -417,6 +470,10 @@ def E2Location_searchGrid(event, trigs, params):
         stay       = np.array([trigs[it].stay for it in range(num_trigs)])
         trig_times = np.array([trigs[it].time for it in range(num_trigs)])
 
+
+        # Distance from event (grid center) to each station
+        #print("Station epicentral distances (km):", np.sqrt(stax**2 + stay**2))
+
         # 2-D grid of index values  shape: (grid_width, grid_width)
         YY, XX = np.meshgrid(grid_y, grid_x, indexing='ij')
         YKM    = YY * grid_spacing_km
@@ -424,10 +481,12 @@ def E2Location_searchGrid(event, trigs, params):
         YLAT   = lat0 + YKM / mpd
         XLON   = lon0 + XKM / f
 
+
         # Distance from every grid point to every station  shape: (grid_width, grid_width, num_trigs)
         TX   = stax - XKM[:, :, np.newaxis]
         TY   = stay - YKM[:, :, np.newaxis]
-        DIST = np.sqrt(TX**2 + TY**2)
+
+        DIST = np.sqrt(TX**2 + TY**2 + evdepth**2)
 
         # Travel times and per-station origin time estimates  shape: (grid_width, grid_width, num_trigs)
         STT     = ttf(DIST)
@@ -448,16 +507,75 @@ def E2Location_searchGrid(event, trigs, params):
 
         # Likelihood  shape: (grid_width, grid_width)
         LIKE = np.sqrt(np.exp(-0.5 * (RESIDUALS**2).sum(axis=2)) / num_trigs)
-        LIKE_floor = 0.01* np.nanmax(LIKE)
         
         # Optional - zero-out the likelihood low values (<1% of the max)
+        _floor_value = 0.0
+        LIKE_floor = _floor_value * np.nanmax(LIKE)
         LIKE[LIKE<LIKE_floor] = 0
+
+        # ---- Per-grid-point activity mask (comment out block to disable) -----
+        # R_max is a scalar updated each iteration: distance from the current
+        # grid center (event.lat/lon) to the farthest triggered station.
+        # On version 1 this is the initial EPIC estimate; on subsequent versions
+        # it is the previous posterior location (stax/stay are always relative
+        # to event.lat/lon, which is updated by grid migration between versions).
+        # For each grid point we count triggered and non-triggered active stations
+        # within R_max and zero the likelihood where the triggered fraction is
+        # below activity_threshold (including points with zero triggered inside).
+        _ACTIVITY_FRAC_GRID = None
+        if getattr(params, 'station_inventory', None) is not None:
+            _act_threshold = getattr(params, 'activity_threshold', 0.40)
+            inv = params.station_inventory
+
+            triggered_set = {(trigs[it].sta, trigs[it].net) for it in range(num_trigs)}
+            utrig_mask = np.array(
+                [(s, n) not in triggered_set
+                 for s, n in zip(inv['station'].values, inv['network'].values)]
+            )
+            utrig_x_km = (inv['longitude'].values[utrig_mask] - lon0) * f
+            utrig_y_km = (inv['latitude'].values[utrig_mask] - lat0) * mpd
+
+            # Scalar R_max: distance from previous posterior (or grid center on
+            # version 1) to the farthest triggered station.
+            if getattr(params, 'prev_posterior_lat', None) is not None:
+                ref_x_km = (params.prev_posterior_lon - lon0) * f
+                ref_y_km = (params.prev_posterior_lat - lat0) * mpd
+            else:
+                ref_x_km, ref_y_km = 0.0, 0.0  # grid center = initial estimate
+            r_max_global = float(np.sqrt((stax - ref_x_km)**2 + (stay - ref_y_km)**2).max())
+
+            # Per-grid-point counts within r_max_global
+            # TX, TY already computed above; shape (grid_width, grid_width, num_trigs)
+            DIST_TRIG_EPI = np.sqrt(TX**2 + TY**2)
+            N_TRIG_INSIDE = (DIST_TRIG_EPI <= r_max_global).sum(axis=2)  # shape (grid_width, grid_width)
+
+            if len(utrig_x_km) > 0:
+                DIST_UTRIG = np.sqrt(
+                    (utrig_x_km - XKM[:, :, np.newaxis])**2 +
+                    (utrig_y_km - YKM[:, :, np.newaxis])**2
+                )                                             # shape (grid_width, grid_width, n_utrig)
+                N_UTRIG_INSIDE = (DIST_UTRIG <= r_max_global).sum(axis=2)
+            else:
+                N_UTRIG_INSIDE = np.zeros(XKM.shape, dtype=int)
+
+            denom = N_TRIG_INSIDE + N_UTRIG_INSIDE
+            # Where no active stations exist near a grid point, treat as eligible
+            _ACTIVITY_FRAC_GRID = np.where(denom > 0, N_TRIG_INSIDE / denom, 1.0)
+            LIKE[_ACTIVITY_FRAC_GRID < _act_threshold] = 0.0
+        # ---- End per-grid-point activity mask --------------------------------
 
         ly, lx = np.unravel_index(np.argmax(LIKE),LIKE.shape)
 
         t.best_location_like = float(LIKE[ly, lx])
         t.like_lon = float(XLON[ly, lx])
         t.like_lat = float(YLAT[ly, lx])
+
+        # After computing ly, lx
+        map_xkm = XKM[ly, lx]  # = lx offset in km from lat0/lon0
+        map_ykm = YKM[ly, lx]
+
+        epi_dist = np.sqrt((stax - map_xkm)**2 + (stay - map_ykm)**2)
+        print("Station distances from LIKE epicenter (km):", epi_dist)
 
         # TODO - make grid center on expecation or likelihood see how it affect
 
@@ -469,7 +587,8 @@ def E2Location_searchGrid(event, trigs, params):
             PRIOR_GRID = prior_info.grid[J, I]
 
         # Posterior  shape: (grid_width, grid_width)
-        POST = LIKE * PRIOR_GRID
+        POST =LIKE * PRIOR_GRID
+
 
         # Best location
         by, bx = np.unravel_index(np.argmax(POST), POST.shape)
@@ -479,9 +598,10 @@ def E2Location_searchGrid(event, trigs, params):
         t.posterior_lat      = float(YLAT[by, bx])
 
         _post_sum = POST.sum()
+        print(_post_sum)
         POST_norm = POST / _post_sum
         _like_sum = LIKE.sum()
-        LIKE_norm = LIKE / _like_sum()
+        LIKE_norm = LIKE / _like_sum
 
         # Expectation (center of probability mass)
         t.exp_lon = float(np.sum(XLON * POST_norm) )#/ _post_sum)
@@ -500,60 +620,62 @@ def E2Location_searchGrid(event, trigs, params):
         t.best_prior         = float(PRIOR_GRID[by, bx])
         t.frac_misfit        = float(FRAC_MISFIT[by, bx])
 
-        """
-        Draft implementation of post-location statoin triggering criterion
-        Per Amy Williamson's email describing the operation of EPIC/bEPIC
-        TODO - need description of 'retry location with different trigger set'
-        details
-        NOTE - searching for the available station inventory for a given
-        seismic event must take place externally - the station inventory
-        is pd.DataFrame passed via params, with columns (station, network,
-        latitude, longitude)
-        """
-        # Activity eligibility check: evaluated at the MAP epicenter (post-location).
-        # Mirrors the operational EPIC criterion: at least `activity_threshold` fraction
-        # of stations within the farthest-triggered-station radius must be triggered.
-        activity_eligible = True
-        activity_frac = np.nan
-        if getattr(params, 'station_inventory', None) is not None:
-            threshold = getattr(params, 'activity_threshold', 0.40)
-            inv = params.station_inventory
+        # Scalar activity metrics at MAP location — derived from the per-grid-point
+        # mask computed above.  If the mask was disabled (no station_inventory),
+        # defaults to eligible so downstream code is unaffected.
+        if _ACTIVITY_FRAC_GRID is not None:
+            t.activity_frac     = float(_ACTIVITY_FRAC_GRID[by, bx])
+            t.activity_eligible = bool(t.activity_frac >= getattr(params, 'activity_threshold', 0.40))
+        else:
+            t.activity_eligible = True
+            t.activity_frac     = np.nan
 
-            triggered_set = {(trigs[it].sta, trigs[it].net) for it in range(num_trigs)}
-            untrig_mask_bools = np.array(
-                [(s, n) not in triggered_set
-                 for s, n in zip(inv['station'].values, inv['network'].values)]
-            )
-            utrig_lons = inv['longitude'].values[untrig_mask_bools]
-            utrig_lats = inv['latitude'].values[untrig_mask_bools]
+        # ---- Post-location activity check (MAP-based, comment out to disable) ----
+        # Alternative to the per-grid-point mask above.  Evaluates the activity
+        # criterion only at the MAP epicenter after location, then flags the result.
+        # Does NOT zero any likelihood entries — purely a post-hoc flag.
+        # activity_eligible = True
+        # activity_frac = np.nan
+        # if getattr(params, 'station_inventory', None) is not None:
+        #     threshold = getattr(params, 'activity_threshold', 0.40)
+        #     inv = params.station_inventory
+        #
+        #     triggered_set = {(trigs[it].sta, trigs[it].net) for it in range(num_trigs)}
+        #     untrig_mask_bools = np.array(
+        #         [(s, n) not in triggered_set
+        #          for s, n in zip(inv['station'].values, inv['network'].values)]
+        #     )
+        #     utrig_lons = inv['longitude'].values[untrig_mask_bools]
+        #     utrig_lats = inv['latitude'].values[untrig_mask_bools]
+        #
+        #     epi_x_km = float(XKM[by, bx])
+        #     epi_y_km = float(YKM[by, bx])
+        #
+        #     trig_lons_arr = np.array([trigs[it].lon for it in range(num_trigs)])
+        #     trig_lats_arr = np.array([trigs[it].lat for it in range(num_trigs)])
+        #     trig_x_km = (trig_lons_arr - lon0) * f
+        #     trig_y_km = (trig_lats_arr - lat0) * mpd
+        #     dist_epi_trig = np.sqrt((trig_x_km - epi_x_km)**2 + (trig_y_km - epi_y_km)**2)
+        #     r_max_km = float(dist_epi_trig.max())
+        #
+        #     if len(utrig_lons) > 0:
+        #         utrig_x_km = (utrig_lons - lon0) * f
+        #         utrig_y_km = (utrig_lats - lat0) * mpd
+        #         dist_epi_utrig = np.sqrt(
+        #             (utrig_x_km - epi_x_km)**2 + (utrig_y_km - epi_y_km)**2
+        #         )
+        #         n_utrig_inside = int((dist_epi_utrig <= r_max_km).sum())
+        #     else:
+        #         n_utrig_inside = 0
+        #
+        #     activity_frac = num_trigs / (num_trigs + n_utrig_inside)
+        #     activity_eligible = bool(activity_frac >= threshold)
+        #
+        # t.activity_eligible = activity_eligible
+        # t.activity_frac = activity_frac
+        # ---- End post-location activity check --------------------------------
 
-            epi_x_km = float(XKM[by, bx])
-            epi_y_km = float(YKM[by, bx])
-
-            trig_lons_arr = np.array([trigs[it].lon for it in range(num_trigs)])
-            trig_lats_arr = np.array([trigs[it].lat for it in range(num_trigs)])
-            trig_x_km = (trig_lons_arr - lon0) * f
-            trig_y_km = (trig_lats_arr - lat0) * mpd
-            dist_epi_trig = np.sqrt((trig_x_km - epi_x_km)**2 + (trig_y_km - epi_y_km)**2)
-            r_max_km = float(dist_epi_trig.max())
-
-            if len(utrig_lons) > 0:
-                utrig_x_km = (utrig_lons - lon0) * f
-                utrig_y_km = (utrig_lats - lat0) * mpd
-                dist_epi_utrig = np.sqrt(
-                    (utrig_x_km - epi_x_km)**2 + (utrig_y_km - epi_y_km)**2
-                )
-                n_utrig_inside = int((dist_epi_utrig <= r_max_km).sum())
-            else:
-                n_utrig_inside = 0
-
-            activity_frac = num_trigs / (num_trigs + n_utrig_inside)
-            activity_eligible = bool(activity_frac >= threshold)
-
-        t.activity_eligible = activity_eligible
-        t.activity_frac = activity_frac
-
-        # Output DataFrame built from arrays (not row-by-row)
+        #Output DataFrame built from arrays (not row-by-row)
         output_df = pd.DataFrame({
             'y':                 YY.ravel(),
             'x':                 XX.ravel(),
@@ -561,8 +683,8 @@ def E2Location_searchGrid(event, trigs, params):
             'lon':               XLON.ravel(),
             'like':              LIKE.ravel(),
             'prior':             PRIOR_GRID.ravel(),
-            'activity_eligible': activity_eligible,
-            'activity_frac':     activity_frac,
+            'activity_eligible': t.activity_eligible,
+            'activity_frac':     t.activity_frac,
             'post':              POST.ravel(),
             'misfitrms':         MISFITSQ.ravel(),
             'misfitave':         MISFIT_AVE.ravel(),
