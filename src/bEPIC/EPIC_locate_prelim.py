@@ -514,14 +514,12 @@ def E2Location_searchGrid(event, trigs, params):
         LIKE[LIKE<LIKE_floor] = 0
 
         # ---- Per-grid-point activity mask (comment out block to disable) -----
-        # R_max is a scalar updated each iteration: distance from the current
-        # grid center (event.lat/lon) to the farthest triggered station.
-        # On version 1 this is the initial EPIC estimate; on subsequent versions
-        # it is the previous posterior location (stax/stay are always relative
-        # to event.lat/lon, which is updated by grid migration between versions).
-        # For each grid point we count triggered and non-triggered active stations
-        # within R_max and zero the likelihood where the triggered fraction is
-        # below activity_threshold (including points with zero triggered inside).
+        # For each grid node p, R_max(p) = distance from p to the farthest
+        # triggered station.  All num_trigs triggered stations are inside
+        # R_max(p) by construction, so N_TRIG_INSIDE = num_trigs everywhere.
+        # N_UTRIG_INSIDE(p) counts active-but-untriggered stations within
+        # R_max(p).  The activity fraction num_trigs / (num_trigs + N_UTRIG)
+        # is zeroed where the fraction falls below activity_threshold.
         _ACTIVITY_FRAC_GRID = None
         if getattr(params, 'station_inventory', None) is not None:
             _act_threshold = getattr(params, 'activity_threshold', 0.40)
@@ -535,33 +533,31 @@ def E2Location_searchGrid(event, trigs, params):
             utrig_x_km = (inv['longitude'].values[utrig_mask] - lon0) * f
             utrig_y_km = (inv['latitude'].values[utrig_mask] - lat0) * mpd
 
-            # Scalar R_max: distance from previous posterior (or grid center on
-            # version 1) to the farthest triggered station.
-            if getattr(params, 'prev_posterior_lat', None) is not None:
-                ref_x_km = (params.prev_posterior_lon - lon0) * f
-                ref_y_km = (params.prev_posterior_lat - lat0) * mpd
-            else:
-                ref_x_km, ref_y_km = 0.0, 0.0  # grid center = initial estimate
-            r_max_global = float(np.sqrt((stax - ref_x_km)**2 + (stay - ref_y_km)**2).max())
+            # Per-node R_max: distance from each grid point to the farthest
+            # triggered station.  TX, TY shape: (grid_width, grid_width, num_trigs)
+            DIST_TRIG_EPI = np.sqrt(TX**2 + TY**2)              # (gw, gw, num_trigs)
+            R_MAX_GRID    = DIST_TRIG_EPI.max(axis=2)            # (gw, gw)
 
-            # Per-grid-point counts within r_max_global
-            # TX, TY already computed above; shape (grid_width, grid_width, num_trigs)
-            DIST_TRIG_EPI = np.sqrt(TX**2 + TY**2)
-            N_TRIG_INSIDE = (DIST_TRIG_EPI <= r_max_global).sum(axis=2)  # shape (grid_width, grid_width)
+            # All triggered stations are within R_MAX_GRID by definition
+            N_TRIG_INSIDE = num_trigs  # scalar, uniform across the grid
 
             if len(utrig_x_km) > 0:
                 DIST_UTRIG = np.sqrt(
                     (utrig_x_km - XKM[:, :, np.newaxis])**2 +
                     (utrig_y_km - YKM[:, :, np.newaxis])**2
-                )                                             # shape (grid_width, grid_width, n_utrig)
-                N_UTRIG_INSIDE = (DIST_UTRIG <= r_max_global).sum(axis=2)
+                )                                                 # (gw, gw, n_utrig)
+                N_UTRIG_INSIDE = (DIST_UTRIG <= R_MAX_GRID[:, :, np.newaxis]).sum(axis=2)
             else:
                 N_UTRIG_INSIDE = np.zeros(XKM.shape, dtype=int)
 
-            denom = N_TRIG_INSIDE + N_UTRIG_INSIDE
-            # Where no active stations exist near a grid point, treat as eligible
-            _ACTIVITY_FRAC_GRID = np.where(denom > 0, N_TRIG_INSIDE / denom, 1.0)
-            LIKE[_ACTIVITY_FRAC_GRID < _act_threshold] = 0.0
+            # num_trigs >= 1 always here, so denominator is never zero
+            _ACTIVITY_FRAC_GRID = num_trigs / (num_trigs + N_UTRIG_INSIDE)
+
+            masked_like = LIKE.copy()
+            masked_like[_ACTIVITY_FRAC_GRID < _act_threshold] = 0.0
+            if masked_like.max() > 0:
+                LIKE = masked_like
+            #LIKE[_ACTIVITY_FRAC_GRID < _act_threshold] = 0.0
         # ---- End per-grid-point activity mask --------------------------------
 
         ly, lx = np.unravel_index(np.argmax(LIKE),LIKE.shape)
@@ -585,6 +581,7 @@ def E2Location_searchGrid(event, trigs, params):
             J = np.clip(np.round((YLAT - _prior_ylower) / _prior_dy).astype(int), 0, _prior_my - 1)
             I = np.clip(np.round((XLON - _prior_xlower) / _prior_dx).astype(int), 0, _prior_mx - 1)
             PRIOR_GRID = prior_info.grid[J, I]
+            PRIOR_GRID = np.where(np.isfinite(PRIOR_GRID), PRIOR_GRID, 0.0)
 
         # Posterior  shape: (grid_width, grid_width)
         POST =LIKE * PRIOR_GRID
