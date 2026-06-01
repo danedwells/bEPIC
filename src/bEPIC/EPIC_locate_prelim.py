@@ -181,7 +181,7 @@ class EPIC_PARAMS:
     def __init__(self):
         self.MAX_EVENT_TRIGS = 100
         self.LocationPVelocity = 6.0
-        self.migrate_grid = True              # if True, re-centre the search grid on the posterior MAP after each version
+        self.migrate_grid = True             # if True, re-centre the search grid on the posterior MAP after each version
         self.migrate_grid_min_triggers = 1   # only migrate once this many triggers have been reached
         self.station_inventory  = None  # DataFrame with columns: station, network, longitude, latitude
                                         # None disables the activity check (default, fully backward-compatible)
@@ -203,16 +203,12 @@ def get_dist_between_two_points_km(lon1,lat1,lon2,lat2):
 
 def E2Location_locate(params,event):
     
-
-
     #// Initialize search variables
     evlat  = event.lat                   # I think this is just to save the old location
     evlon  = event.lon
     evtime = event.time
     evdepth = event.depth
 
-
-   
     #// set new event location 
     event.lat = evlat
     event.lon = evlon
@@ -222,17 +218,13 @@ def E2Location_locate(params,event):
 
     # ---------------------------------------------------
     # // MULTI STATION LOCATION
-
-    #for all triggers in trigger object
-    #// Find event and station coordinates on x-y grid (flat earth).
-    event = latLonToXY(event)
-    
+    event = latLonToXY(event) 
     trigs = event.trigs
-    
-    
+     
     t,output_df = E2Location_searchGrid(event,trigs, params)
     
-    location_type = 'map' # 'map or 'exp'
+    # TODO - test 'exp'
+    location_type = 'map' # 'map or 'exp' - recenter on only one of them.
     if location_type == 'map':
         evlon = t.posterior_lon
         evlat = t.posterior_lat
@@ -283,16 +275,10 @@ def E2Location_locate(params,event):
     return(t,output_df)
         
 
-
-
-
-
 def E2Location_searchGrid(event, trigs, params):
-    
     # replicate searchGrid
     # running a full replicate is really slow in Python- python does really well at
     # vectorized functions. C++ is doing a lot of looping here over multiple threads
-    
     
     #// Initialize search variables
     evlat  = event.lat                   # I think this is just to save the old location
@@ -300,15 +286,10 @@ def E2Location_searchGrid(event, trigs, params):
     evtime = event.time
     evdepth = event.depth
     
-   
     num_trigs = min(len(trigs), params.MAX_EVENT_TRIGS)
     trigs     = trigs[:num_trigs]
     print("TRIGS: ",trigs[0].stax)
     print("TRIGS: ",trigs[0].stay)
-
-    trig_ot = np.zeros(num_trigs)
-    stt_arr = np.zeros(num_trigs)
-
 
    #// The location grid is a square with (2*GridSize + 1) grid-points on each side
    #// The grid point separation is (GridKm / GridSize)
@@ -470,7 +451,6 @@ def E2Location_searchGrid(event, trigs, params):
         stay       = np.array([trigs[it].stay for it in range(num_trigs)])
         trig_times = np.array([trigs[it].time for it in range(num_trigs)])
 
-
         # Distance from event (grid center) to each station
         #print("Station epicentral distances (km):", np.sqrt(stax**2 + stay**2))
 
@@ -481,11 +461,9 @@ def E2Location_searchGrid(event, trigs, params):
         YLAT   = lat0 + YKM / mpd
         XLON   = lon0 + XKM / f
 
-
         # Distance from every grid point to every station  shape: (grid_width, grid_width, num_trigs)
         TX   = stax - XKM[:, :, np.newaxis]
         TY   = stay - YKM[:, :, np.newaxis]
-
         DIST = np.sqrt(TX**2 + TY**2 + evdepth**2)
 
         # Travel times and per-station origin time estimates  shape: (grid_width, grid_width, num_trigs)
@@ -509,7 +487,7 @@ def E2Location_searchGrid(event, trigs, params):
         LIKE = np.sqrt(np.exp(-0.5 * (RESIDUALS**2).sum(axis=2)) / num_trigs)
         
         # Optional - zero-out the likelihood low values (<1% of the max)
-        _floor_value = 0.0
+        _floor_value = 0.0 # must be greater than 0 to have an effect
         LIKE_floor = _floor_value * np.nanmax(LIKE)
         LIKE[LIKE<LIKE_floor] = 0
 
@@ -538,9 +516,6 @@ def E2Location_searchGrid(event, trigs, params):
             DIST_TRIG_EPI = np.sqrt(TX**2 + TY**2)              # (gw, gw, num_trigs)
             R_MAX_GRID    = DIST_TRIG_EPI.max(axis=2)            # (gw, gw)
 
-            # All triggered stations are within R_MAX_GRID by definition
-            N_TRIG_INSIDE = num_trigs  # scalar, uniform across the grid
-
             if len(utrig_x_km) > 0:
                 DIST_UTRIG = np.sqrt(
                     (utrig_x_km - XKM[:, :, np.newaxis])**2 +
@@ -553,9 +528,10 @@ def E2Location_searchGrid(event, trigs, params):
             # num_trigs >= 1 always here, so denominator is never zero
             _ACTIVITY_FRAC_GRID = num_trigs / (num_trigs + N_UTRIG_INSIDE)
 
+            # Check if this will zero out the likelihood function. If so, skip.
             masked_like = LIKE.copy()
             masked_like[_ACTIVITY_FRAC_GRID < _act_threshold] = 0.0
-            if masked_like.max() > 0:
+            if masked_like.max() > 0: # if there are no positive non-zero values, this step is skipped
                 LIKE = masked_like
             #LIKE[_ACTIVITY_FRAC_GRID < _act_threshold] = 0.0
         # ---- End per-grid-point activity mask --------------------------------
@@ -572,8 +548,6 @@ def E2Location_searchGrid(event, trigs, params):
 
         epi_dist = np.sqrt((stax - map_xkm)**2 + (stay - map_ykm)**2)
         print("Station distances from LIKE epicenter (km):", epi_dist)
-
-        # TODO - make grid center on expecation or likelihood see how it affect
 
         # Prior  shape: (grid_width, grid_width)
         PRIOR_GRID = np.ones_like(LIKE)

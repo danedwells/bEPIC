@@ -151,13 +151,13 @@ def run_bEPIC(project_parent_directory, postgres_id, velocity_model, GridSize, G
              likelihood_lon, likelihood_lat) = likelihood.calculate_likelihood(
                 CenterPoint, sta_df, velocity_model, GridSize, GridSpacing)
 
-            # --- Prior: seismicity-based spatial prior ---
-            if prior_model is not None:
-                prior_function, prior_lon, prior_lat = prior_file.compute_prior_from_model(
-                    CenterPoint, GridSize, GridSpacing, prior_model)
-            else:
-                prior_function, prior_lon, prior_lat = prior.compute_prior(
-                    CenterPoint, GridSize, GridSpacing, ANSS_timestamp=None)
+            # # --- Prior: seismicity-based spatial prior ---
+            # if prior_model is not None:
+            #     prior_function, prior_lon, prior_lat = prior_file.compute_prior_from_model(
+            #         CenterPoint, GridSize, GridSpacing, prior_model)
+            # else:
+            prior_function, prior_lon, prior_lat = prior.compute_prior(
+                CenterPoint, GridSize, GridSpacing, ANSS_timestamp=None)
 
             # --- Posterior: combine likelihood and prior to get the best location estimate ---
             post, posterior_lon, posterior_lat = posterior.compute_posterior(
