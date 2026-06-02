@@ -288,8 +288,6 @@ def E2Location_searchGrid(event, trigs, params):
     
     num_trigs = min(len(trigs), params.MAX_EVENT_TRIGS)
     trigs     = trigs[:num_trigs]
-    print("TRIGS: ",trigs[0].stax)
-    print("TRIGS: ",trigs[0].stay)
 
    #// The location grid is a square with (2*GridSize + 1) grid-points on each side
    #// The grid point separation is (GridKm / GridSize)
@@ -470,8 +468,24 @@ def E2Location_searchGrid(event, trigs, params):
         STT     = ttf(DIST)
         TRIG_OT = trig_times - STT
 
+        #################################################################
+        # ── CHANGE 1: ROBUST ORIGIN TIME ESTIMATE ────────────────────────────
+        # Replace the straight mean with a trimmed mean (drops the top+bottom
+        # `trim_frac` fraction of per-station OT estimates before averaging).
+        # Reduces sensitivity to outlier picks that currently poison AVEOT and
+        # shift the entire likelihood surface.
+        #
+        # Set trim_frac = 0.0 to recover the original straight mean.
+        USE_ROBUST_OT = True
+        trim_frac     = 0.1   # fraction trimmed from each tail (0.0–0.49)
         # Mean origin time per grid point  shape: (grid_width, grid_width)
-        AVEOT = TRIG_OT.mean(axis=2)
+        if USE_ROBUST_OT and num_trigs >= 4:
+            k = max(1, int(np.floor(trim_frac * num_trigs)))
+            OT_sorted = np.sort(TRIG_OT, axis=2)
+            AVEOT = OT_sorted[:, :, k:-k].mean(axis=2)   # trimmed mean
+        else:
+            AVEOT = TRIG_OT.mean(axis=2)                  # original
+        #################################################################
 
         # Residuals  shape: (grid_width, grid_width, num_trigs)
         RESIDUALS = TRIG_OT - AVEOT[:, :, np.newaxis]
@@ -479,13 +493,86 @@ def E2Location_searchGrid(event, trigs, params):
         # Misfit metrics  shape: (grid_width, grid_width)
         MISFITSQ   = (RESIDUALS**2).mean(axis=2)
         MISFIT_AVE = np.abs(RESIDUALS).mean(axis=2)
+
         # Mean fractional travel-time error: |residual| / travel_time, averaged over stations.
         # np.where guards against division by zero at grid points coinciding with a station.
         FRAC_MISFIT = np.nanmean(np.abs(RESIDUALS) / np.where(STT > 0, STT, np.nan), axis=2)
 
+        # ── CHANGE 2: CAUCHY LIKELIHOOD KERNEL ───────────────────────────────
+        # Replace the Gaussian exp(-0.5 * r²) with a Cauchy kernel 1/(1 + 0.5*r²).
+        # Cauchy has much heavier tails: a single bad pick (large residual) contributes
+        # a finite penalty rather than driving the product to ~0 everywhere else,
+        # so it spreads less spurious probability mass from outlier stations.
+        # Kernel options: 'gaussian', 'cauchy', 'studentt'
+        KERNEL    = 'gaussian'
+        STUDENT_NU = 1.0   # degrees of freedom; lower = heavier tails (nu->inf recovers Gaussian)
+
         # Likelihood  shape: (grid_width, grid_width)
-        LIKE = np.sqrt(np.exp(-0.5 * (RESIDUALS**2).sum(axis=2)) / num_trigs)
+        # TODO - look at scaling the residual by uncertainty (or a distance proxy)
+        # i.e., uncertainty proportional to distance
+        SIGMA_S = 1
+        SIG_TERM = -1/(2*SIGMA_S**2)
+        if KERNEL == 'cauchy':
+            # Product of per-station Cauchy terms; take geometric mean for scale invariance.
+            # shape: (grid_width, grid_width)
+            LIKE = np.prod(1.0 / (1.0 + -SIG_TERM * RESIDUALS**2), axis=2) ** (1.0 / num_trigs)
+        elif KERNEL == 'gaussian':
+            LIKE = np.sqrt(np.exp(SIG_TERM * (RESIDUALS**2).sum(axis=2))  / num_trigs)
+        elif KERNEL == 'studentt':
+            LIKE = np.exp(-((STUDENT_NU + 1) / 2) * np.log1p((RESIDUALS / SIGMA_S)**2 / STUDENT_NU).mean(axis=2))
         
+
+
+        # ── CHANGE 3: DIFFERENTIAL TRAVEL-TIME (DTT) LIKELIHOOD ──────────────
+        # For each station pair (i,j), compute:
+        #   observed DTT  = trig_times[i] - trig_times[j]
+        #   predicted DTT = STT[:,:,i]    - STT[:,:,j]
+        #   residual_ij   = observed - predicted
+        # This eliminates the origin-time nuisance parameter entirely — DTT
+        # residuals are independent of OT — and is much better constrained by
+        # network geometry.  The final LIKE_DTT is combined multiplicatively
+        # with LIKE above; set DTT_WEIGHT = 0.0 to disable.
+        #
+        # Kernel choice mirrors Change 2: Cauchy if USE_CAUCHY, else Gaussian.
+        # DTT_SIGMA_S controls the residual scale (seconds); tune to your network.
+        USE_DTT    = True
+        DTT_WEIGHT = 0.9    # 0.0 = standard LIKE only, 1.0 = DTT only, 0.5 = equal blend
+        DTT_SIGMA_S =0.2   # expected std of DTT residuals in seconds
+
+        if USE_DTT and num_trigs >= 2:
+
+            #print("Applying DTT: ")
+
+            # Kernel options: 'gaussian', 'cauchy', 'studentt'
+            KERNEL    = 'gaussian'
+            STUDENT_NU = 0.1   # degrees of freedom; lower = heavier tails (nu->inf recovers Gaussian)
+
+            # np.tiru indices gets index pairs of upper RH matrix of (num_trigs,num_trigs).
+            ## ii goes through it by row, jj goes through by column
+            ii, jj    = np.triu_indices(num_trigs, k=1)
+            # Get the differnece in observed trigerr times between stations ii and jj
+            obs_dtt   = trig_times[ii] - trig_times[jj]
+            # get the difference in predicted travel times between stations ii and jj from the lookup table
+            pred_dtt  = STT[:, :, ii]  - STT[:, :, jj]
+            # Get the residual - weight this in the DTT_LIKELIHOOD
+            dtt_resid = (obs_dtt - pred_dtt) / DTT_SIGMA_S
+
+            if KERNEL == 'gaussian':
+                std =1 # tuneable, really should tune DTT_SIGMA_S
+                dtt_terms = -(1/(2*std**2)) * dtt_resid**2
+            elif KERNEL == 'cauchy':
+                std = 1
+                dtt_terms = -np.log1p((1/(2*std**2)) * dtt_resid**2)
+            elif KERNEL == 'studentt':
+                dtt_terms = -((STUDENT_NU + 1) / 2) * np.log1p(dtt_resid**2 / STUDENT_NU)
+
+            LIKE_DTT = np.exp(dtt_terms.mean(axis=2))
+
+            # Blend: raise each surface to its weight, then re-normalise
+            LIKE = (LIKE ** (1.0 - DTT_WEIGHT)) * (LIKE_DTT ** DTT_WEIGHT)
+            LIKE[LIKE==0] = 1E-10 # floor value to prevent all zeros
+            LIKE /= LIKE.sum()
+
         # Optional - zero-out the likelihood low values (<1% of the max)
         _floor_value = 0.0 # must be greater than 0 to have an effect
         LIKE_floor = _floor_value * np.nanmax(LIKE)
@@ -547,7 +634,7 @@ def E2Location_searchGrid(event, trigs, params):
         map_ykm = YKM[ly, lx]
 
         epi_dist = np.sqrt((stax - map_xkm)**2 + (stay - map_ykm)**2)
-        print("Station distances from LIKE epicenter (km):", epi_dist)
+        #print("Station distances from LIKE epicenter (km):", epi_dist)
 
         # Prior  shape: (grid_width, grid_width)
         PRIOR_GRID = np.ones_like(LIKE)
@@ -558,7 +645,7 @@ def E2Location_searchGrid(event, trigs, params):
             PRIOR_GRID = np.where(np.isfinite(PRIOR_GRID), PRIOR_GRID, 0.0)
 
         # Posterior  shape: (grid_width, grid_width)
-        POST =LIKE * PRIOR_GRID
+        POST = LIKE * PRIOR_GRID
 
 
         # Best location
@@ -569,9 +656,12 @@ def E2Location_searchGrid(event, trigs, params):
         t.posterior_lat      = float(YLAT[by, bx])
 
         _post_sum = POST.sum()
-        print(_post_sum)
+        if _post_sum == 0:
+            raise ValueError("Sum of posterior probabilities is zero - check likelihood and prior!")
         POST_norm = POST / _post_sum
         _like_sum = LIKE.sum()
+        if _like_sum == 0:
+            raise ValueError("Sum of likelihood probabilities is zero - check likelihood calculation!")
         LIKE_norm = LIKE / _like_sum
 
         # Expectation (center of probability mass)
