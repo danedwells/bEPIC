@@ -19,11 +19,9 @@ What this code needs as inputs:
 
     (2) what stations trigger and when
 
-
     t = TriggerManager(lon = station_lon, lat = station_lat, sta=station_name, net=station_network, chan=station_channel,trigger_time = station_trigger_timestamp)
     event.trigs.append(t)    #(for each trigger, you add it to the event)
 
-    
 
     (3) event replay parameters:
     
@@ -35,7 +33,6 @@ What this code needs as inputs:
     params.method = 'EPIC C'     # keep this as EPIC C
     
     
-    
     # GridSize and GridKm are grandfathered the nomenclature of EPIC, which is a bit wonky.
     # EPIC uses a square grid. GridKm is the distance from the center to the edge. So if
     # GridKm = 50, the dimensions of the grid search are 100 by 100 km. 
@@ -43,12 +40,9 @@ What this code needs as inputs:
     #
     # I know, it is unnecessarily confusing.
     
-    
-    
     # call the event using the params and event objects
     
     t,output_df = E2Location_locate(params,event)
-
 
     # ------------------------------------------------------
     # OUTPUTS
@@ -58,9 +52,6 @@ What this code needs as inputs:
     output_df is a dataframe that is grid n x grid m in length containing the output
     information (misfit, likelihood, prior, post) for all grid nodes
     
-    
-
-
 
 Created on Fri Oct 31 13:24:40 2025
 @author: amy
@@ -69,6 +60,7 @@ import numpy as np
 from scipy import interpolate
 import pandas as pd
 import os
+from scipy.special import logsumexp
 bepic = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def latLonToXY(event):
@@ -289,10 +281,10 @@ def E2Location_searchGrid(event, trigs, params):
     num_trigs = min(len(trigs), params.MAX_EVENT_TRIGS)
     trigs     = trigs[:num_trigs]
 
-   #// The location grid is a square with (2*GridSize + 1) grid-points on each side
-   #// The grid point separation is (GridKm / GridSize)
+    #// The location grid is a square with (2*GridSize + 1) grid-points on each side
+    #// The grid point separation is (GridKm / GridSize)
     grid_size       = params.GridSize            # // 25
-    grid_width      = 2*grid_size + 1;
+    grid_width      = 2*grid_size + 1
     grid_km         = params.GridKm              #  // 50.
     grid_spacing_km = grid_km/grid_size;          # // 2.0
     p_velocity      = params.LocationPVelocity   # // 6.0
@@ -333,114 +325,7 @@ def E2Location_searchGrid(event, trigs, params):
 
     if params.method == 'EPIC C':
 
-        # #---- original triple-nested loop (preserved for reference) ----
-        # output_df = pd.DataFrame(columns=['y','x','lat','lon','like','prior','post','misfitrms','misfitave'])
-        # print('grid spacing: '+str(grid_spacing_km))
-        # _frac_misfit_vals = []
-        # for y in grid_y:
-        #     ykm = y*grid_spacing_km
-        #     ylat = lat0 + ykm/mpd
-        #     if params.use_prior == True:
-        #         a = (ylat - _prior_ylower)/_prior_dy
-        #         j = (int)(a+0.5)
-        #         if(j<0): j=0
-        #         if (j >= _prior_my): j = _prior_my - 1
-        #     for x in grid_x:
-        #         xkm = x*grid_spacing_km
-        #         sumOT = 0
-        #         for it in range(num_trigs):
-        #             tx   = trigs[it].stax - xkm
-        #             ty   = trigs[it].stay - ykm
-        #             dist = np.sqrt(tx*tx + ty*ty)
-        #             stt = ttf(dist)
-        #             stt_arr[it] = stt
-        #             trig_ot[it] = trigs[it].time - stt
-        #             sumOT += trig_ot[it]
-        #         aveOT = sumOT/num_trigs
-        #         rms   = 0
-        #         ttsum = 0
-        #         for it in range(num_trigs):
-        #             rms   += np.power(trig_ot[it]-aveOT,2)
-        #             ttsum += np.fabs(trig_ot[it]-aveOT)
-        #         misfitsq = rms/num_trigs
-        #         misfit_ave = ttsum/num_trigs
-        #         frac_misfit_val = float(np.nanmean(np.where(stt_arr > 0, np.fabs(trig_ot - aveOT) / stt_arr, np.nan)))
-        #         like = 1
-        #         for it in range(num_trigs):
-        #             tterror = trig_ot[it] - aveOT
-        #             d = tterror*tterror
-        #             e = np.exp(-0.5*d)
-        #             like *= e
-        #         like = np.sqrt(like/num_trigs)
-        #         post = like
-        #         Prior = 1
-        #         xlon = lon0 +xkm/f
-        #         if params.use_prior == True:
-        #             a = (xlon - _prior_xlower)/_prior_dx
-        #             i = (int)(a+0.5)
-        #             if (i < 0): i = 0
-        #             if (i >= _prior_mx): i = _prior_mx - 1
-        #             Prior = prior_info.grid[j, i]
-        #             post = like*Prior
-        #         output_df.loc[len(output_df)] = [y,x,ylat,xlon,like,Prior,post,misfitsq,misfit_ave]
-        #         _frac_misfit_vals.append(frac_misfit_val)
-        #         if post > t.best_location_post:
-        #             t.best_location_post = post
-        #             t.posterior_lon = xlon
-        #             t.posterior_lat = ylat
-        #             t.best_misfit = misfitsq
-        #             t.misfit_ave = misfit_ave
-        #             t.best_OT = aveOT
-        #             t.best_grid_x = x
-        #             t.best_grid_y = y
-        #             t.best_value = post
-        #             t.best_like = like
-        #             t.best_prior = Prior
-        #             t.frac_misfit = frac_misfit_val
-
-        # t.activity_eligible = True
-        # t.activity_frac = np.nan
-        # _post_arr = output_df['post'].values
-        # _like_arr = output_df['like'].values
-        # _ylat_arr = output_df['lat'].values
-        # _xlon_arr = output_df['lon'].values
-        # _post_sum_v = _post_arr.sum()
-        # _like_sum_v = _like_arr.sum()
-        # t.exp_lon = float(np.sum(_xlon_arr * _post_arr) / _post_sum_v)
-        # t.exp_lat = float(np.sum(_ylat_arr * _post_arr) / _post_sum_v)
-        # t.like_exp_lon = float(np.sum(_xlon_arr * _like_arr) / _like_sum_v)
-        # t.like_exp_lat = float(np.sum(_ylat_arr * _like_arr) / _like_sum_v)
-        # _best_like_idx = int(np.argmax(_like_arr))
-        # t.best_location_like = float(_like_arr[_best_like_idx])
-        # t.like_lon = float(_xlon_arr[_best_like_idx])
-        # t.like_lat = float(_ylat_arr[_best_like_idx])
-        # output_df['misfitfrac'] = _frac_misfit_vals
-        # prior = output_df['prior'].values
-        # POST = output_df['post'].values
-        # MISFITSQ = output_df['misfitrms'].values
-        # MISFIT_AVE = output_df['misfitave'].values
-        # FRAC_MISFIT = output_df['misfitfrac'].values
-        # ylat = output_df['lat'].values
-        # xlon = output_df['lon'].values
-        # like = output_df['like'].values
-        # grid_y = output_df['y'].values
-        # grid_x = output_df['x'].values
-        # # Output DataFrame built from arrays (not row-by-row)
-        # output_df = pd.DataFrame({
-        #     'y':                 grid_y.ravel(),
-        #     'x':                 grid_x.ravel(),
-        #     'lat':               ylat.ravel(),
-        #     'lon':               xlon.ravel(),
-        #     'like':              like.ravel(),
-        #     'prior':             prior.ravel(),
-        #     'activity_eligible': t.activity_eligible,
-        #     'activity_frac':     t.activity_frac,
-        #     'post':              POST.ravel(),
-        #     'misfitrms':         MISFITSQ.ravel(),
-        #     'misfitave':         MISFIT_AVE.ravel(),
-        #     'misfitfrac':        FRAC_MISFIT.ravel(),
-        # })
-
+        # Note - see bottom of file for original, pythonized C++ triple loop
         # ---- vectorized replacement ----
         print('grid spacing: '+str(grid_spacing_km))
 
@@ -448,9 +333,6 @@ def E2Location_searchGrid(event, trigs, params):
         stax       = np.array([trigs[it].stax for it in range(num_trigs)])
         stay       = np.array([trigs[it].stay for it in range(num_trigs)])
         trig_times = np.array([trigs[it].time for it in range(num_trigs)])
-
-        # Distance from event (grid center) to each station
-        #print("Station epicentral distances (km):", np.sqrt(stax**2 + stay**2))
 
         # 2-D grid of index values  shape: (grid_width, grid_width)
         YY, XX = np.meshgrid(grid_y, grid_x, indexing='ij')
@@ -510,19 +392,22 @@ def E2Location_searchGrid(event, trigs, params):
         # Likelihood  shape: (grid_width, grid_width)
         # TODO - look at scaling the residual by uncertainty (or a distance proxy)
         # i.e., uncertainty proportional to distance
-        SIGMA_S = 1
+        SIGMA_S = getattr(params, 'sigma_s', 1.)
         SIG_TERM = -1/(2*SIGMA_S**2)
         if KERNEL == 'cauchy':
             # Product of per-station Cauchy terms; take geometric mean for scale invariance.
             # shape: (grid_width, grid_width)
             LIKE = np.prod(1.0 / (1.0 + -SIG_TERM * RESIDUALS**2), axis=2) ** (1.0 / num_trigs)
         elif KERNEL == 'gaussian':
-            LIKE = np.sqrt(np.exp(SIG_TERM * (RESIDUALS**2).sum(axis=2))  / num_trigs)
+            # Work in log space and normalise by the max before exponentiating:
+            # for small SIGMA_S, SIG_TERM * residual**2 underflows exp() to 0
+            # everywhere, zeroing the whole likelihood surface (same issue fixed
+            # for EDT_SIGMA_S above).
+            LOG_LIKE = 0.5 * (SIG_TERM * (RESIDUALS**2).sum(axis=2) - np.log(num_trigs))
+            LIKE = np.exp(LOG_LIKE - np.nanmax(LOG_LIKE))
         elif KERNEL == 'studentt':
             LIKE = np.exp(-((STUDENT_NU + 1) / 2) * np.log1p((RESIDUALS / SIGMA_S)**2 / STUDENT_NU).mean(axis=2))
         
-
-
         # ── CHANGE 3: DIFFERENTIAL TRAVEL-TIME (DTT) LIKELIHOOD ──────────────
         # For each station pair (i,j), compute:
         #   observed DTT  = trig_times[i] - trig_times[j]
@@ -536,45 +421,61 @@ def E2Location_searchGrid(event, trigs, params):
         # Kernel choice mirrors Change 2: Cauchy if USE_CAUCHY, else Gaussian.
         # DTT_SIGMA_S controls the residual scale (seconds); tune to your network.
         USE_DTT    = True
-        DTT_WEIGHT = 0.9    # 0.0 = standard LIKE only, 1.0 = DTT only, 0.5 = equal blend
-        DTT_SIGMA_S =0.2   # expected std of DTT residuals in seconds
+        DTT_WEIGHT = getattr(params,'dtt_weight',0.5)
+        if DTT_WEIGHT < 0.00001:
+            print("DTT_weight too small - skipping DTT.")
+            USE_DTT = False
+        EDT_SIGMA_S = getattr(params, 'edt_sigma_s', 0.2)
+        #print("SIGMA_S within E2Location_searchGrid(): ",SIGMA_S)
+        #print("EDT_SIGMA_S within E2Locaiton_searchGrid(): ",EDT_SIGMA_S)
+        #print("DTT_WEIGHT in E2Location_searchGrid: ",DTT_WEIGHT)
 
         if USE_DTT and num_trigs >= 2:
 
-            #print("Applying DTT: ")
-
-            # Kernel options: 'gaussian', 'cauchy', 'studentt'
-            KERNEL    = 'gaussian'
-            STUDENT_NU = 0.1   # degrees of freedom; lower = heavier tails (nu->inf recovers Gaussian)
-
-            # np.tiru indices gets index pairs of upper RH matrix of (num_trigs,num_trigs).
-            ## ii goes through it by row, jj goes through by column
+            # METH_EDT likelihood — replace the LIKE_DTT block inside USE_DTT
+            #----------------------------------------
+            #Variables already available: ii, jj, obs_dtt, pred_dtt, trig_times, STT
             ii, jj    = np.triu_indices(num_trigs, k=1)
             # Get the differnece in observed trigerr times between stations ii and jj
             obs_dtt   = trig_times[ii] - trig_times[jj]
             # get the difference in predicted travel times between stations ii and jj from the lookup table
             pred_dtt  = STT[:, :, ii]  - STT[:, :, jj]
-            # Get the residual - weight this in the DTT_LIKELIHOOD
-            dtt_resid = (obs_dtt - pred_dtt) / DTT_SIGMA_S
 
-            if KERNEL == 'gaussian':
-                std =1 # tuneable, really should tune DTT_SIGMA_S
-                dtt_terms = -(1/(2*std**2)) * dtt_resid**2
-            elif KERNEL == 'cauchy':
-                std = 1
-                dtt_terms = -np.log1p((1/(2*std**2)) * dtt_resid**2)
-            elif KERNEL == 'studentt':
-                dtt_terms = -((STUDENT_NU + 1) / 2) * np.log1p(dtt_resid**2 / STUDENT_NU)
 
-            LIKE_DTT = np.exp(dtt_terms.mean(axis=2))
 
-            # Blend: raise each surface to its weight, then re-normalise
-            LIKE = (LIKE ** (1.0 - DTT_WEIGHT)) * (LIKE_DTT ** DTT_WEIGHT)
-            LIKE[LIKE==0] = 1E-10 # floor value to prevent all zeros
-            LIKE /= LIKE.sum()
+            # Use per-station tterror if populated, otherwise fall back to uniform sigma
+            sigma_arr = np.array([trigs[it].tterror for it in range(num_trigs)])
+            if not np.all(np.isfinite(sigma_arr)):
+                sigma_arr = np.full(num_trigs, EDT_SIGMA_S)
+
+
+
+
+            # Per-pair combined variance and weight  shape: (n_pairs,)
+            sig2_pair = sigma_arr[ii]**2 + sigma_arr[jj]**2
+            w_ij      = 1.0 / np.sqrt(sig2_pair)
+            log_w    = np.log(w_ij)
+
+
+            # Raw DTT residuals  shape: (grid_width, grid_width, n_pairs)
+            eps_ij = obs_dtt - pred_dtt   # obs_dtt broadcasts from (n_pairs,) against pred_dtt
+
+            # Gaussian probability per pair  shape: (grid_width, grid_width, n_pairs)
+            log_p_ij = -eps_ij**2 / (2.0 * sig2_pair)
+            #p_ij = np.exp(-eps_ij**2 / (2.0 * sig2_pair))
+
+            # METH_EDT: weighted sum, normalised so the surface integrates comparably across versions
+            #LIKE_EDT = (w_ij * p_ij).sum(axis=2) / w_ij.sum()   # shape: (grid_width, grid_width)
+            LOG_LIKE_EDT = logsumexp(log_p_ij + log_w, axis=2) - np.log(w_ij.sum())
+
+            LIKE_EDT = np.exp(LOG_LIKE_EDT - LOG_LIKE_EDT.max())
+
+            #Then in your blend line (currently line 572), replace LIKE_DTT with LIKE_EDT:
+            LIKE = (LIKE ** (1.0 - DTT_WEIGHT)) * (LIKE_EDT ** DTT_WEIGHT)
+            #----------------------------------------
 
         # Optional - zero-out the likelihood low values (<1% of the max)
-        _floor_value = 0.0 # must be greater than 0 to have an effect
+        _floor_value = getattr(params, "floor_value", 0.)
         LIKE_floor = _floor_value * np.nanmax(LIKE)
         LIKE[LIKE<LIKE_floor] = 0
 
@@ -629,13 +530,6 @@ def E2Location_searchGrid(event, trigs, params):
         t.like_lon = float(XLON[ly, lx])
         t.like_lat = float(YLAT[ly, lx])
 
-        # After computing ly, lx
-        map_xkm = XKM[ly, lx]  # = lx offset in km from lat0/lon0
-        map_ykm = YKM[ly, lx]
-
-        epi_dist = np.sqrt((stax - map_xkm)**2 + (stay - map_ykm)**2)
-        #print("Station distances from LIKE epicenter (km):", epi_dist)
-
         # Prior  shape: (grid_width, grid_width)
         PRIOR_GRID = np.ones_like(LIKE)
         if params.use_prior:
@@ -644,9 +538,20 @@ def E2Location_searchGrid(event, trigs, params):
             PRIOR_GRID = prior_info.grid[J, I]
             PRIOR_GRID = np.where(np.isfinite(PRIOR_GRID), PRIOR_GRID, 0.0)
 
+            # Floor to a tiny fraction of this prior's own max so a near-zero
+            # (but not out-of-bounds) prior cell can't zero out POST when a
+            # small sigma_s has collapsed LIKE to a single-cell spike there.
+            # LIKE's own peak cell is always exactly 1.0 (see log-space
+            # normalisation above), so flooring PRIOR_GRID alone is enough to
+            # guarantee POST.sum() > 0 without masking genuinely-zero priors
+            # over an entire grid (e.g. a broken/empty prior file).
+            _prior_floor_frac = getattr(params, 'prior_floor_frac', 1e-12)
+            _prior_max = np.nanmax(PRIOR_GRID)
+            if _prior_floor_frac > 0 and _prior_max > 0:
+                PRIOR_GRID = np.maximum(PRIOR_GRID, _prior_floor_frac * _prior_max)
+
         # Posterior  shape: (grid_width, grid_width)
         POST = LIKE * PRIOR_GRID
-
 
         # Best location
         by, bx = np.unravel_index(np.argmax(POST), POST.shape)
@@ -777,3 +682,111 @@ def E2Location_searchGrid(event, trigs, params):
 
 
 
+# Original loop:
+
+        # output_df = pd.DataFrame(columns=['y','x','lat','lon','like','prior','post','misfitrms','misfitave'])
+        # print('grid spacing: '+str(grid_spacing_km))
+        # _frac_misfit_vals = []
+        # for y in grid_y:
+        #     ykm = y*grid_spacing_km
+        #     ylat = lat0 + ykm/mpd
+        #     if params.use_prior == True:
+        #         a = (ylat - _prior_ylower)/_prior_dy
+        #         j = (int)(a+0.5)
+        #         if(j<0): j=0
+        #         if (j >= _prior_my): j = _prior_my - 1
+        #     for x in grid_x:
+        #         xkm = x*grid_spacing_km
+        #         sumOT = 0
+        #         for it in range(num_trigs):
+        #             tx   = trigs[it].stax - xkm
+        #             ty   = trigs[it].stay - ykm
+        #             dist = np.sqrt(tx*tx + ty*ty)
+        #             stt = ttf(dist)
+        #             stt_arr[it] = stt
+        #             trig_ot[it] = trigs[it].time - stt
+        #             sumOT += trig_ot[it]
+        #         aveOT = sumOT/num_trigs
+        #         rms   = 0
+        #         ttsum = 0
+        #         for it in range(num_trigs):
+        #             rms   += np.power(trig_ot[it]-aveOT,2)
+        #             ttsum += np.fabs(trig_ot[it]-aveOT)
+        #         misfitsq = rms/num_trigs
+        #         misfit_ave = ttsum/num_trigs
+        #         frac_misfit_val = float(np.nanmean(np.where(stt_arr > 0, np.fabs(trig_ot - aveOT) / stt_arr, np.nan)))
+        #         like = 1
+        #         for it in range(num_trigs):
+        #             tterror = trig_ot[it] - aveOT
+        #             d = tterror*tterror
+        #             e = np.exp(-0.5*d)
+        #             like *= e
+        #         like = np.sqrt(like/num_trigs)
+        #         post = like
+        #         Prior = 1
+        #         xlon = lon0 +xkm/f
+        #         if params.use_prior == True:
+        #             a = (xlon - _prior_xlower)/_prior_dx
+        #             i = (int)(a+0.5)
+        #             if (i < 0): i = 0
+        #             if (i >= _prior_mx): i = _prior_mx - 1
+        #             Prior = prior_info.grid[j, i]
+        #             post = like*Prior
+        #         output_df.loc[len(output_df)] = [y,x,ylat,xlon,like,Prior,post,misfitsq,misfit_ave]
+        #         _frac_misfit_vals.append(frac_misfit_val)
+        #         if post > t.best_location_post:
+        #             t.best_location_post = post
+        #             t.posterior_lon = xlon
+        #             t.posterior_lat = ylat
+        #             t.best_misfit = misfitsq
+        #             t.misfit_ave = misfit_ave
+        #             t.best_OT = aveOT
+        #             t.best_grid_x = x
+        #             t.best_grid_y = y
+        #             t.best_value = post
+        #             t.best_like = like
+        #             t.best_prior = Prior
+        #             t.frac_misfit = frac_misfit_val
+
+        # t.activity_eligible = True
+        # t.activity_frac = np.nan
+        # _post_arr = output_df['post'].values
+        # _like_arr = output_df['like'].values
+        # _ylat_arr = output_df['lat'].values
+        # _xlon_arr = output_df['lon'].values
+        # _post_sum_v = _post_arr.sum()
+        # _like_sum_v = _like_arr.sum()
+        # t.exp_lon = float(np.sum(_xlon_arr * _post_arr) / _post_sum_v)
+        # t.exp_lat = float(np.sum(_ylat_arr * _post_arr) / _post_sum_v)
+        # t.like_exp_lon = float(np.sum(_xlon_arr * _like_arr) / _like_sum_v)
+        # t.like_exp_lat = float(np.sum(_ylat_arr * _like_arr) / _like_sum_v)
+        # _best_like_idx = int(np.argmax(_like_arr))
+        # t.best_location_like = float(_like_arr[_best_like_idx])
+        # t.like_lon = float(_xlon_arr[_best_like_idx])
+        # t.like_lat = float(_ylat_arr[_best_like_idx])
+        # output_df['misfitfrac'] = _frac_misfit_vals
+        # prior = output_df['prior'].values
+        # POST = output_df['post'].values
+        # MISFITSQ = output_df['misfitrms'].values
+        # MISFIT_AVE = output_df['misfitave'].values
+        # FRAC_MISFIT = output_df['misfitfrac'].values
+        # ylat = output_df['lat'].values
+        # xlon = output_df['lon'].values
+        # like = output_df['like'].values
+        # grid_y = output_df['y'].values
+        # grid_x = output_df['x'].values
+        # # Output DataFrame built from arrays (not row-by-row)
+        # output_df = pd.DataFrame({
+        #     'y':                 grid_y.ravel(),
+        #     'x':                 grid_x.ravel(),
+        #     'lat':               ylat.ravel(),
+        #     'lon':               xlon.ravel(),
+        #     'like':              like.ravel(),
+        #     'prior':             prior.ravel(),
+        #     'activity_eligible': t.activity_eligible,
+        #     'activity_frac':     t.activity_frac,
+        #     'post':              POST.ravel(),
+        #     'misfitrms':         MISFITSQ.ravel(),
+        #     'misfitave':         MISFIT_AVE.ravel(),
+        #     'misfitfrac':        FRAC_MISFIT.ravel(),
+        # })
