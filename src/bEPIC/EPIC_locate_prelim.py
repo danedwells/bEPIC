@@ -521,6 +521,15 @@ def E2Location_searchGrid(event, trigs, params):
             masked_like[_ACTIVITY_FRAC_GRID < _act_threshold] = 0.0
             if masked_like.max() > 0: # if there are no positive non-zero values, this step is skipped
                 LIKE = masked_like
+                # The mask can zero out LIKE's original peak cell (guaranteed
+                # exactly 1.0 by the log-space normalisation above) and leave
+                # only a much smaller surviving cell. Re-normalise so the new
+                # peak is 1.0 again — otherwise a near-underflow LIKE peak
+                # multiplied by a small (but nonzero) PRIOR_GRID value below
+                # can underflow POST to exact 0.0.
+                _like_peak = LIKE.max()
+                if 0 < _like_peak < 1.0:
+                    LIKE = LIKE / _like_peak
             #LIKE[_ACTIVITY_FRAC_GRID < _act_threshold] = 0.0
         # ---- End per-grid-point activity mask --------------------------------
 
