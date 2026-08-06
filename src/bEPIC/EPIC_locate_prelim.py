@@ -56,12 +56,49 @@ What this code needs as inputs:
 Created on Fri Oct 31 13:24:40 2025
 @author: amy
 """
+import copy
 import numpy as np
 from scipy import interpolate
 import pandas as pd
 import os
 from scipy.special import logsumexp
 bepic = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Cache of depth (km) -> interp1d P travel-time function. Built lazily so a
+# depth that's never searched never pays the disk-read/interpolation cost.
+_TT_TABLE_CACHE = {}
+
+
+def _travel_time_table_path(depth_km):
+    """h2p+ak135.080 == depth 8.0 km -> depth*10, zero-padded to 3 digits.
+
+    Matches the naming convention used by generate_travel_time_tables.py.
+    """
+    return f'{bepic}/data/h2p+ak135.{int(round(depth_km * 10)):03d}'
+
+
+def _get_travel_time_function(depth_km):
+    """Cached interp1d P travel-time function for a given source depth (km).
+
+    E2Location_searchGrid is called once per event/version; without this
+    cache the table would be re-read from disk and re-interpolated every
+    call, and that cost multiplies by len(params.search_depths).
+    """
+    if depth_km not in _TT_TABLE_CACHE:
+        path = _travel_time_table_path(depth_km)
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"No travel-time table for depth={depth_km} km at {path}. "
+                f"Generate one with: python generate_travel_time_tables.py "
+                f"--depths {depth_km}"
+            )
+        tt_mod = np.genfromtxt(path, skip_header=1)
+        _TT_TABLE_CACHE[depth_km] = interpolate.interp1d(
+            tt_mod[:, 0], tt_mod[:, 1],
+            bounds_error=False,
+            fill_value=(tt_mod[0, 1], tt_mod[-1, 1]),
+        )
+    return _TT_TABLE_CACHE[depth_km]
 
 def latLonToXY(event):
     lat0 =event.lat
@@ -167,6 +204,7 @@ class SearchOut:
         self.frac_misfit = 0
         self.activity_eligible = True
         self.activity_frac = np.nan
+        self.best_depth = np.nan
 
 
 class EPIC_PARAMS:
@@ -180,6 +218,8 @@ class EPIC_PARAMS:
         self.activity_threshold = 0.40  # min fraction triggered/(triggered+total inside R) to pass eligibility
         self.prev_posterior_lat = None  # posterior lat from previous version; None on first version
         self.prev_posterior_lon = None  # posterior lon from previous version; None on first version
+        self.search_depths = [8.0]      # km; candidate source depths to search. Default of a single
+                                         # 8 km entry preserves the original fixed-depth behaviour exactly.
         
         
 
@@ -276,8 +316,7 @@ def E2Location_searchGrid(event, trigs, params):
     evlat  = event.lat                   # I think this is just to save the old location
     evlon  = event.lon
     evtime = event.time
-    evdepth = event.depth
-    
+
     num_trigs = min(len(trigs), params.MAX_EVENT_TRIGS)
     trigs     = trigs[:num_trigs]
 
@@ -298,15 +337,8 @@ def E2Location_searchGrid(event, trigs, params):
     _prior_mx     = len(prior_info.lons)
     _prior_my     = len(prior_info.lats)
 
-   
-    # velocity model
-    vel_mod_filename = f'{bepic}/data/h2p+ak135.080'
-    tt_mod = np.genfromtxt(vel_mod_filename, skip_header=1)
-    ttf = interpolate.interp1d(tt_mod[:,0], tt_mod[:,1],
-                               bounds_error=False,
-                               fill_value=(tt_mod[0,1], tt_mod[-1,1]))
 
-    lat0  = evlat;       
+    lat0  = evlat;
     lon0  = evlon
     R     = 6378.137;               
     ff    = 1./298.257                                # // flattening factor
@@ -341,269 +373,306 @@ def E2Location_searchGrid(event, trigs, params):
         YLAT   = lat0 + YKM / mpd
         XLON   = lon0 + XKM / f
 
-        # Distance from every grid point to every station  shape: (grid_width, grid_width, num_trigs)
-        TX   = stax - XKM[:, :, np.newaxis]
-        TY   = stay - YKM[:, :, np.newaxis]
-        DIST = np.sqrt(TX**2 + TY**2 + evdepth**2)
-
-        # Travel times and per-station origin time estimates  shape: (grid_width, grid_width, num_trigs)
-        STT     = ttf(DIST)
-        TRIG_OT = trig_times - STT
-
-        #################################################################
-        # ── CHANGE 1: ROBUST ORIGIN TIME ESTIMATE ────────────────────────────
-        # Replace the straight mean with a trimmed mean (drops the top+bottom
-        # `trim_frac` fraction of per-station OT estimates before averaging).
-        # Reduces sensitivity to outlier picks that currently poison AVEOT and
-        # shift the entire likelihood surface.
+        # Search every candidate depth in params.search_depths and keep
+        # whichever one's posterior is best supported by the data. With the
+        # default search_depths=[8.0] this loop runs exactly once and
+        # reproduces the original fixed-depth behaviour unchanged.
         #
-        # Set trim_frac = 0.0 to recover the original straight mean.
-        USE_ROBUST_OT = True
-        trim_frac     = 0.1   # fraction trimmed from each tail (0.0–0.49)
-        # Mean origin time per grid point  shape: (grid_width, grid_width)
-        if USE_ROBUST_OT and num_trigs >= 4:
-            k = max(1, int(np.floor(trim_frac * num_trigs)))
-            OT_sorted = np.sort(TRIG_OT, axis=2)
-            AVEOT = OT_sorted[:, :, k:-k].mean(axis=2)   # trimmed mean
-        else:
-            AVEOT = TRIG_OT.mean(axis=2)                  # original
-        #################################################################
+        # Depth comparison uses the RAW (pre-renormalisation) log-likelihood
+        # peak, not the final per-depth-normalised LIKE/POST peak: LIKE is
+        # deliberately renormalised to a peak of exactly 1.0 within each
+        # depth's own grid (see "Work in log space..." below) to avoid
+        # underflow -- but that renormalisation also erases the very
+        # information (how well this depth's travel times fit the picks,
+        # in an absolute sense) that depth selection needs. So a separate,
+        # un-normalised score is tracked per depth purely to pick the
+        # winner; the winning depth's already-normalised LIKE/POST/output_df
+        # are then used unchanged for everything downstream, exactly as in
+        # the original single-depth code.
+        _best_depth_score = -np.inf
+        _best_t = None
+        _best_output_df = None
 
-        # Residuals  shape: (grid_width, grid_width, num_trigs)
-        RESIDUALS = TRIG_OT - AVEOT[:, :, np.newaxis]
+        for evdepth in params.search_depths:
+            ttf = _get_travel_time_function(evdepth)
 
-        # Misfit metrics  shape: (grid_width, grid_width)
-        MISFITSQ   = (RESIDUALS**2).mean(axis=2)
-        MISFIT_AVE = np.abs(RESIDUALS).mean(axis=2)
+            # Distance from every grid point to every station  shape: (grid_width, grid_width, num_trigs)
+            TX   = stax - XKM[:, :, np.newaxis]
+            TY   = stay - YKM[:, :, np.newaxis]
+            DIST = np.sqrt(TX**2 + TY**2 + evdepth**2)
 
-        # Mean fractional travel-time error: |residual| / travel_time, averaged over stations.
-        # np.where guards against division by zero at grid points coinciding with a station.
-        FRAC_MISFIT = np.nanmean(np.abs(RESIDUALS) / np.where(STT > 0, STT, np.nan), axis=2)
+            # Travel times and per-station origin time estimates  shape: (grid_width, grid_width, num_trigs)
+            STT     = ttf(DIST)
+            TRIG_OT = trig_times - STT
 
-        # ── CHANGE 2: CAUCHY LIKELIHOOD KERNEL ───────────────────────────────
-        # Replace the Gaussian exp(-0.5 * r²) with a Cauchy kernel 1/(1 + 0.5*r²).
-        # Cauchy has much heavier tails: a single bad pick (large residual) contributes
-        # a finite penalty rather than driving the product to ~0 everywhere else,
-        # so it spreads less spurious probability mass from outlier stations.
-        # Kernel options: 'gaussian', 'cauchy', 'studentt'
-        KERNEL    = 'gaussian'
-        STUDENT_NU = 1.0   # degrees of freedom; lower = heavier tails (nu->inf recovers Gaussian)
-
-        # Likelihood  shape: (grid_width, grid_width)
-        # TODO - look at scaling the residual by uncertainty (or a distance proxy)
-        # i.e., uncertainty proportional to distance
-        SIGMA_S = getattr(params, 'sigma_s', 1.)
-        SIG_TERM = -1/(2*SIGMA_S**2)
-        if KERNEL == 'cauchy':
-            # Product of per-station Cauchy terms; take geometric mean for scale invariance.
-            # shape: (grid_width, grid_width)
-            LIKE = np.prod(1.0 / (1.0 + -SIG_TERM * RESIDUALS**2), axis=2) ** (1.0 / num_trigs)
-        elif KERNEL == 'gaussian':
-            # Work in log space and normalise by the max before exponentiating:
-            # for small SIGMA_S, SIG_TERM * residual**2 underflows exp() to 0
-            # everywhere, zeroing the whole likelihood surface (same issue fixed
-            # for EDT_SIGMA_S above).
-            LOG_LIKE = 0.5 * (SIG_TERM * (RESIDUALS**2).sum(axis=2) - np.log(num_trigs))
-            LIKE = np.exp(LOG_LIKE - np.nanmax(LOG_LIKE))
-        elif KERNEL == 'studentt':
-            LIKE = np.exp(-((STUDENT_NU + 1) / 2) * np.log1p((RESIDUALS / SIGMA_S)**2 / STUDENT_NU).mean(axis=2))
-        
-        # ── CHANGE 3: DIFFERENTIAL TRAVEL-TIME (DTT) LIKELIHOOD ──────────────
-        # For each station pair (i,j), compute:
-        #   observed DTT  = trig_times[i] - trig_times[j]
-        #   predicted DTT = STT[:,:,i]    - STT[:,:,j]
-        #   residual_ij   = observed - predicted
-        # This eliminates the origin-time nuisance parameter entirely — DTT
-        # residuals are independent of OT — and is much better constrained by
-        # network geometry.  The final LIKE_DTT is combined multiplicatively
-        # with LIKE above; set DTT_WEIGHT = 0.0 to disable.
-        #
-        # Kernel choice mirrors Change 2: Cauchy if USE_CAUCHY, else Gaussian.
-        # DTT_SIGMA_S controls the residual scale (seconds); tune to your network.
-        USE_DTT    = True
-        DTT_WEIGHT = getattr(params,'dtt_weight',0.5)
-        if DTT_WEIGHT < 0.00001:
-            print("DTT_weight too small - skipping DTT.")
-            USE_DTT = False
-        EDT_SIGMA_S = getattr(params, 'edt_sigma_s', 0.2)
-        #print("SIGMA_S within E2Location_searchGrid(): ",SIGMA_S)
-        #print("EDT_SIGMA_S within E2Locaiton_searchGrid(): ",EDT_SIGMA_S)
-        #print("DTT_WEIGHT in E2Location_searchGrid: ",DTT_WEIGHT)
-
-        if USE_DTT and num_trigs >= 2:
-
-            # METH_EDT likelihood — replace the LIKE_DTT block inside USE_DTT
-            #----------------------------------------
-            #Variables already available: ii, jj, obs_dtt, pred_dtt, trig_times, STT
-            ii, jj    = np.triu_indices(num_trigs, k=1)
-            # Get the differnece in observed trigerr times between stations ii and jj
-            obs_dtt   = trig_times[ii] - trig_times[jj]
-            # get the difference in predicted travel times between stations ii and jj from the lookup table
-            pred_dtt  = STT[:, :, ii]  - STT[:, :, jj]
-
-
-
-            # Use per-station tterror if populated, otherwise fall back to uniform sigma
-            sigma_arr = np.array([trigs[it].tterror for it in range(num_trigs)])
-            if not np.all(np.isfinite(sigma_arr)):
-                sigma_arr = np.full(num_trigs, EDT_SIGMA_S)
-
-
-
-
-            # Per-pair combined variance and weight  shape: (n_pairs,)
-            sig2_pair = sigma_arr[ii]**2 + sigma_arr[jj]**2
-            w_ij      = 1.0 / np.sqrt(sig2_pair)
-            log_w    = np.log(w_ij)
-
-
-            # Raw DTT residuals  shape: (grid_width, grid_width, n_pairs)
-            eps_ij = obs_dtt - pred_dtt   # obs_dtt broadcasts from (n_pairs,) against pred_dtt
-
-            # Gaussian probability per pair  shape: (grid_width, grid_width, n_pairs)
-            log_p_ij = -eps_ij**2 / (2.0 * sig2_pair)
-            #p_ij = np.exp(-eps_ij**2 / (2.0 * sig2_pair))
-
-            # METH_EDT: weighted sum, normalised so the surface integrates comparably across versions
-            #LIKE_EDT = (w_ij * p_ij).sum(axis=2) / w_ij.sum()   # shape: (grid_width, grid_width)
-            LOG_LIKE_EDT = logsumexp(log_p_ij + log_w, axis=2) - np.log(w_ij.sum())
-
-            LIKE_EDT = np.exp(LOG_LIKE_EDT - LOG_LIKE_EDT.max())
-
-            #Then in your blend line (currently line 572), replace LIKE_DTT with LIKE_EDT:
-            LIKE = (LIKE ** (1.0 - DTT_WEIGHT)) * (LIKE_EDT ** DTT_WEIGHT)
-            #----------------------------------------
-
-        # Optional - zero-out the likelihood low values (<1% of the max)
-        _floor_value = getattr(params, "floor_value", 0.)
-        LIKE_floor = _floor_value * np.nanmax(LIKE)
-        LIKE[LIKE<LIKE_floor] = 0
-
-        # ---- Per-grid-point activity mask (comment out block to disable) -----
-        # For each grid node p, R_max(p) = distance from p to the farthest
-        # triggered station.  All num_trigs triggered stations are inside
-        # R_max(p) by construction, so N_TRIG_INSIDE = num_trigs everywhere.
-        # N_UTRIG_INSIDE(p) counts active-but-untriggered stations within
-        # R_max(p).  The activity fraction num_trigs / (num_trigs + N_UTRIG)
-        # is zeroed where the fraction falls below activity_threshold.
-        _ACTIVITY_FRAC_GRID = None
-        if getattr(params, 'station_inventory', None) is not None:
-            _act_threshold = getattr(params, 'activity_threshold', 0.40)
-            inv = params.station_inventory
-
-            triggered_set = {(trigs[it].sta, trigs[it].net) for it in range(num_trigs)}
-            utrig_mask = np.array(
-                [(s, n) not in triggered_set
-                 for s, n in zip(inv['station'].values, inv['network'].values)]
-            )
-            utrig_x_km = (inv['longitude'].values[utrig_mask] - lon0) * f
-            utrig_y_km = (inv['latitude'].values[utrig_mask] - lat0) * mpd
-
-            # Per-node R_max: distance from each grid point to the farthest
-            # triggered station.  TX, TY shape: (grid_width, grid_width, num_trigs)
-            DIST_TRIG_EPI = np.sqrt(TX**2 + TY**2)              # (gw, gw, num_trigs)
-            R_MAX_GRID    = DIST_TRIG_EPI.max(axis=2)            # (gw, gw)
-
-            if len(utrig_x_km) > 0:
-                DIST_UTRIG = np.sqrt(
-                    (utrig_x_km - XKM[:, :, np.newaxis])**2 +
-                    (utrig_y_km - YKM[:, :, np.newaxis])**2
-                )                                                 # (gw, gw, n_utrig)
-                N_UTRIG_INSIDE = (DIST_UTRIG <= R_MAX_GRID[:, :, np.newaxis]).sum(axis=2)
+            #################################################################
+            # ── CHANGE 1: ROBUST ORIGIN TIME ESTIMATE ────────────────────────────
+            # Replace the straight mean with a trimmed mean (drops the top+bottom
+            # `trim_frac` fraction of per-station OT estimates before averaging).
+            # Reduces sensitivity to outlier picks that currently poison AVEOT and
+            # shift the entire likelihood surface.
+            #
+            # Set trim_frac = 0.0 to recover the original straight mean.
+            USE_ROBUST_OT = True
+            trim_frac     = 0.1   # fraction trimmed from each tail (0.0–0.49)
+            # Mean origin time per grid point  shape: (grid_width, grid_width)
+            if USE_ROBUST_OT and num_trigs >= 4:
+                k = max(1, int(np.floor(trim_frac * num_trigs)))
+                OT_sorted = np.sort(TRIG_OT, axis=2)
+                AVEOT = OT_sorted[:, :, k:-k].mean(axis=2)   # trimmed mean
             else:
-                N_UTRIG_INSIDE = np.zeros(XKM.shape, dtype=int)
+                AVEOT = TRIG_OT.mean(axis=2)                  # original
+            #################################################################
 
-            # num_trigs >= 1 always here, so denominator is never zero
-            _ACTIVITY_FRAC_GRID = num_trigs / (num_trigs + N_UTRIG_INSIDE)
+            # Residuals  shape: (grid_width, grid_width, num_trigs)
+            RESIDUALS = TRIG_OT - AVEOT[:, :, np.newaxis]
 
-            # Check if this will zero out the likelihood function. If so, skip.
-            masked_like = LIKE.copy()
-            masked_like[_ACTIVITY_FRAC_GRID < _act_threshold] = 0.0
-            if masked_like.max() > 0: # if there are no positive non-zero values, this step is skipped
-                LIKE = masked_like
-                # The mask can zero out LIKE's original peak cell (guaranteed
-                # exactly 1.0 by the log-space normalisation above) and leave
-                # only a much smaller surviving cell. Re-normalise so the new
-                # peak is 1.0 again — otherwise a near-underflow LIKE peak
-                # multiplied by a small (but nonzero) PRIOR_GRID value below
-                # can underflow POST to exact 0.0.
-                _like_peak = LIKE.max()
-                if 0 < _like_peak < 1.0:
-                    LIKE = LIKE / _like_peak
-            #LIKE[_ACTIVITY_FRAC_GRID < _act_threshold] = 0.0
-        # ---- End per-grid-point activity mask --------------------------------
+            # Misfit metrics  shape: (grid_width, grid_width)
+            MISFITSQ   = (RESIDUALS**2).mean(axis=2)
+            MISFIT_AVE = np.abs(RESIDUALS).mean(axis=2)
 
-        ly, lx = np.unravel_index(np.argmax(LIKE),LIKE.shape)
+            # Mean fractional travel-time error: |residual| / travel_time, averaged over stations.
+            # np.where guards against division by zero at grid points coinciding with a station.
+            FRAC_MISFIT = np.nanmean(np.abs(RESIDUALS) / np.where(STT > 0, STT, np.nan), axis=2)
 
-        t.best_location_like = float(LIKE[ly, lx])
-        t.like_lon = float(XLON[ly, lx])
-        t.like_lat = float(YLAT[ly, lx])
+            # ── CHANGE 2: CAUCHY LIKELIHOOD KERNEL ───────────────────────────────
+            # Replace the Gaussian exp(-0.5 * r²) with a Cauchy kernel 1/(1 + 0.5*r²).
+            # Cauchy has much heavier tails: a single bad pick (large residual) contributes
+            # a finite penalty rather than driving the product to ~0 everywhere else,
+            # so it spreads less spurious probability mass from outlier stations.
+            # Kernel options: 'gaussian', 'cauchy', 'studentt'
+            KERNEL    = 'gaussian'
+            STUDENT_NU = 1.0   # degrees of freedom; lower = heavier tails (nu->inf recovers Gaussian)
 
-        # Prior  shape: (grid_width, grid_width)
-        PRIOR_GRID = np.ones_like(LIKE)
-        if params.use_prior:
-            J = np.clip(np.round((YLAT - _prior_ylower) / _prior_dy).astype(int), 0, _prior_my - 1)
-            I = np.clip(np.round((XLON - _prior_xlower) / _prior_dx).astype(int), 0, _prior_mx - 1)
-            PRIOR_GRID = prior_info.grid[J, I]
-            PRIOR_GRID = np.where(np.isfinite(PRIOR_GRID), PRIOR_GRID, 0.0)
+            # Likelihood  shape: (grid_width, grid_width)
+            # TODO - look at scaling the residual by uncertainty (or a distance proxy)
+            # i.e., uncertainty proportional to distance
+            SIGMA_S = getattr(params, 'sigma_s', 1.)
+            SIG_TERM = -1/(2*SIGMA_S**2)
+            # Raw (un-normalised) log-likelihood peak, tracked purely for
+            # cross-depth comparison -- see note above the depth loop.
+            _depth_score = 0.0
+            if KERNEL == 'cauchy':
+                # Product of per-station Cauchy terms; take geometric mean for scale invariance.
+                # shape: (grid_width, grid_width)
+                LIKE = np.prod(1.0 / (1.0 + -SIG_TERM * RESIDUALS**2), axis=2) ** (1.0 / num_trigs)
+                _depth_score = float(np.nanmax(np.log(LIKE)))
+            elif KERNEL == 'gaussian':
+                # Work in log space and normalise by the max before exponentiating:
+                # for small SIGMA_S, SIG_TERM * residual**2 underflows exp() to 0
+                # everywhere, zeroing the whole likelihood surface (same issue fixed
+                # for EDT_SIGMA_S above).
+                LOG_LIKE = 0.5 * (SIG_TERM * (RESIDUALS**2).sum(axis=2) - np.log(num_trigs))
+                _depth_score = float(np.nanmax(LOG_LIKE))
+                LIKE = np.exp(LOG_LIKE - np.nanmax(LOG_LIKE))
+            elif KERNEL == 'studentt':
+                LIKE = np.exp(-((STUDENT_NU + 1) / 2) * np.log1p((RESIDUALS / SIGMA_S)**2 / STUDENT_NU).mean(axis=2))
+                _depth_score = float(np.nanmax(np.log(LIKE)))
 
-            # Floor to a tiny fraction of this prior's own max so a near-zero
-            # (but not out-of-bounds) prior cell can't zero out POST when a
-            # small sigma_s has collapsed LIKE to a single-cell spike there.
-            # LIKE's own peak cell is always exactly 1.0 (see log-space
-            # normalisation above), so flooring PRIOR_GRID alone is enough to
-            # guarantee POST.sum() > 0 without masking genuinely-zero priors
-            # over an entire grid (e.g. a broken/empty prior file).
-            _prior_floor_frac = getattr(params, 'prior_floor_frac', 1e-12)
-            _prior_max = np.nanmax(PRIOR_GRID)
-            if _prior_floor_frac > 0 and _prior_max > 0:
-                PRIOR_GRID = np.maximum(PRIOR_GRID, _prior_floor_frac * _prior_max)
+            # ── CHANGE 3: DIFFERENTIAL TRAVEL-TIME (DTT) LIKELIHOOD ──────────────
+        # For each station pair (i,j), compute:
+            #   observed DTT  = trig_times[i] - trig_times[j]
+            #   predicted DTT = STT[:,:,i]    - STT[:,:,j]
+            #   residual_ij   = observed - predicted
+            # This eliminates the origin-time nuisance parameter entirely — DTT
+            # residuals are independent of OT — and is much better constrained by
+            # network geometry.  The final LIKE_DTT is combined multiplicatively
+            # with LIKE above; set DTT_WEIGHT = 0.0 to disable.
+            #
+            # Kernel choice mirrors Change 2: Cauchy if USE_CAUCHY, else Gaussian.
+            # DTT_SIGMA_S controls the residual scale (seconds); tune to your network.
+            USE_DTT    = True
+            DTT_WEIGHT = getattr(params,'dtt_weight',0.5)
+            if DTT_WEIGHT < 0.00001:
+                print("DTT_weight too small - skipping DTT.")
+                USE_DTT = False
+            EDT_SIGMA_S = getattr(params, 'edt_sigma_s', 0.2)
+            #print("SIGMA_S within E2Location_searchGrid(): ",SIGMA_S)
+            #print("EDT_SIGMA_S within E2Locaiton_searchGrid(): ",EDT_SIGMA_S)
+            #print("DTT_WEIGHT in E2Location_searchGrid: ",DTT_WEIGHT)
 
-        # Posterior  shape: (grid_width, grid_width)
-        POST = LIKE * PRIOR_GRID
+            if USE_DTT and num_trigs >= 2:
 
-        # Best location
-        by, bx = np.unravel_index(np.argmax(POST), POST.shape)
+                # METH_EDT likelihood — replace the LIKE_DTT block inside USE_DTT
+                #----------------------------------------
+                #Variables already available: ii, jj, obs_dtt, pred_dtt, trig_times, STT
+                ii, jj    = np.triu_indices(num_trigs, k=1)
+                # Get the differnece in observed trigerr times between stations ii and jj
+                obs_dtt   = trig_times[ii] - trig_times[jj]
+                # get the difference in predicted travel times between stations ii and jj from the lookup table
+                pred_dtt  = STT[:, :, ii]  - STT[:, :, jj]
 
-        t.best_location_post = float(POST[by, bx])
-        t.posterior_lon      = float(XLON[by, bx])
-        t.posterior_lat      = float(YLAT[by, bx])
 
-        _post_sum = POST.sum()
-        if _post_sum == 0:
-            raise ValueError("Sum of posterior probabilities is zero - check likelihood and prior!")
-        POST_norm = POST / _post_sum
-        _like_sum = LIKE.sum()
-        if _like_sum == 0:
-            raise ValueError("Sum of likelihood probabilities is zero - check likelihood calculation!")
-        LIKE_norm = LIKE / _like_sum
 
-        # Expectation (center of probability mass)
-        t.exp_lon = float(np.sum(XLON * POST_norm) )#/ _post_sum)
-        t.exp_lat = float(np.sum(YLAT * POST_norm) )# / _post_sum)
+                # Use per-station tterror if populated, otherwise fall back to uniform sigma
+                sigma_arr = np.array([trigs[it].tterror for it in range(num_trigs)])
+                if not np.all(np.isfinite(sigma_arr)):
+                    sigma_arr = np.full(num_trigs, EDT_SIGMA_S)
 
-        t.like_exp_lon = float(np.sum(XLON * LIKE_norm))
-        t.like_exp_lat = float(np.sum(YLAT * LIKE_norm))
-        
-        t.best_misfit        = float(MISFITSQ[by, bx])
-        t.misfit_ave         = float(MISFIT_AVE[by, bx])
-        t.best_OT            = float(AVEOT[by, bx])
-        t.best_grid_x        = float(XX[by, bx])
-        t.best_grid_y        = float(YY[by, bx])
-        t.best_value         = float(POST[by, bx])
-        t.best_like          = float(LIKE[by, bx])
-        t.best_prior         = float(PRIOR_GRID[by, bx])
-        t.frac_misfit        = float(FRAC_MISFIT[by, bx])
 
-        # Scalar activity metrics at MAP location — derived from the per-grid-point
-        # mask computed above.  If the mask was disabled (no station_inventory),
-        # defaults to eligible so downstream code is unaffected.
-        if _ACTIVITY_FRAC_GRID is not None:
-            t.activity_frac     = float(_ACTIVITY_FRAC_GRID[by, bx])
-            t.activity_eligible = bool(t.activity_frac >= getattr(params, 'activity_threshold', 0.40))
-        else:
-            t.activity_eligible = True
-            t.activity_frac     = np.nan
+
+
+                # Per-pair combined variance and weight  shape: (n_pairs,)
+                sig2_pair = sigma_arr[ii]**2 + sigma_arr[jj]**2
+                w_ij      = 1.0 / np.sqrt(sig2_pair)
+                log_w    = np.log(w_ij)
+
+
+                # Raw DTT residuals  shape: (grid_width, grid_width, n_pairs)
+                eps_ij = obs_dtt - pred_dtt   # obs_dtt broadcasts from (n_pairs,) against pred_dtt
+
+                # Gaussian probability per pair  shape: (grid_width, grid_width, n_pairs)
+                log_p_ij = -eps_ij**2 / (2.0 * sig2_pair)
+                #p_ij = np.exp(-eps_ij**2 / (2.0 * sig2_pair))
+
+                # METH_EDT: weighted sum, normalised so the surface integrates comparably across versions
+                #LIKE_EDT = (w_ij * p_ij).sum(axis=2) / w_ij.sum()   # shape: (grid_width, grid_width)
+                LOG_LIKE_EDT = logsumexp(log_p_ij + log_w, axis=2) - np.log(w_ij.sum())
+
+                # Blend the raw (pre-normalisation) OT and EDT log-likelihood
+                # peaks for the cross-depth score, using each term's own
+                # argmax as an approximation of the true combined surface's
+                # argmax (exact only when both terms peak at the same grid
+                # cell -- close enough for a coarse depth search).
+                _depth_score = (1.0 - DTT_WEIGHT) * _depth_score + DTT_WEIGHT * float(np.nanmax(LOG_LIKE_EDT))
+
+                LIKE_EDT = np.exp(LOG_LIKE_EDT - LOG_LIKE_EDT.max())
+
+                #Then in your blend line (currently line 572), replace LIKE_DTT with LIKE_EDT:
+                LIKE = (LIKE ** (1.0 - DTT_WEIGHT)) * (LIKE_EDT ** DTT_WEIGHT)
+                #----------------------------------------
+
+            # Optional - zero-out the likelihood low values (<1% of the max)
+            _floor_value = getattr(params, "floor_value", 0.)
+            LIKE_floor = _floor_value * np.nanmax(LIKE)
+            LIKE[LIKE<LIKE_floor] = 0
+
+            # ---- Per-grid-point activity mask (comment out block to disable) -----
+            # For each grid node p, R_max(p) = distance from p to the farthest
+            # triggered station.  All num_trigs triggered stations are inside
+            # R_max(p) by construction, so N_TRIG_INSIDE = num_trigs everywhere.
+            # N_UTRIG_INSIDE(p) counts active-but-untriggered stations within
+            # R_max(p).  The activity fraction num_trigs / (num_trigs + N_UTRIG)
+            # is zeroed where the fraction falls below activity_threshold.
+            _ACTIVITY_FRAC_GRID = None
+            if getattr(params, 'station_inventory', None) is not None:
+                _act_threshold = getattr(params, 'activity_threshold', 0.40)
+                inv = params.station_inventory
+
+                triggered_set = {(trigs[it].sta, trigs[it].net) for it in range(num_trigs)}
+                utrig_mask = np.array(
+                    [(s, n) not in triggered_set
+                     for s, n in zip(inv['station'].values, inv['network'].values)]
+                )
+                utrig_x_km = (inv['longitude'].values[utrig_mask] - lon0) * f
+                utrig_y_km = (inv['latitude'].values[utrig_mask] - lat0) * mpd
+
+                # Per-node R_max: distance from each grid point to the farthest
+                # triggered station.  TX, TY shape: (grid_width, grid_width, num_trigs)
+                DIST_TRIG_EPI = np.sqrt(TX**2 + TY**2)              # (gw, gw, num_trigs)
+                R_MAX_GRID    = DIST_TRIG_EPI.max(axis=2)            # (gw, gw)
+
+                if len(utrig_x_km) > 0:
+                    DIST_UTRIG = np.sqrt(
+                        (utrig_x_km - XKM[:, :, np.newaxis])**2 +
+                        (utrig_y_km - YKM[:, :, np.newaxis])**2
+                    )                                                 # (gw, gw, n_utrig)
+                    N_UTRIG_INSIDE = (DIST_UTRIG <= R_MAX_GRID[:, :, np.newaxis]).sum(axis=2)
+                else:
+                    N_UTRIG_INSIDE = np.zeros(XKM.shape, dtype=int)
+
+                # num_trigs >= 1 always here, so denominator is never zero
+                _ACTIVITY_FRAC_GRID = num_trigs / (num_trigs + N_UTRIG_INSIDE)
+
+                # Check if this will zero out the likelihood function. If so, skip.
+                masked_like = LIKE.copy()
+                masked_like[_ACTIVITY_FRAC_GRID < _act_threshold] = 0.0
+                if masked_like.max() > 0: # if there are no positive non-zero values, this step is skipped
+                    LIKE = masked_like
+                    # The mask can zero out LIKE's original peak cell (guaranteed
+                    # exactly 1.0 by the log-space normalisation above) and leave
+                    # only a much smaller surviving cell. Re-normalise so the new
+                    # peak is 1.0 again — otherwise a near-underflow LIKE peak
+                    # multiplied by a small (but nonzero) PRIOR_GRID value below
+                    # can underflow POST to exact 0.0.
+                    _like_peak = LIKE.max()
+                    if 0 < _like_peak < 1.0:
+                        LIKE = LIKE / _like_peak
+                #LIKE[_ACTIVITY_FRAC_GRID < _act_threshold] = 0.0
+            # ---- End per-grid-point activity mask --------------------------------
+
+            ly, lx = np.unravel_index(np.argmax(LIKE),LIKE.shape)
+
+            t.best_location_like = float(LIKE[ly, lx])
+            t.like_lon = float(XLON[ly, lx])
+            t.like_lat = float(YLAT[ly, lx])
+
+            # Prior  shape: (grid_width, grid_width)
+            PRIOR_GRID = np.ones_like(LIKE)
+            if params.use_prior:
+                J = np.clip(np.round((YLAT - _prior_ylower) / _prior_dy).astype(int), 0, _prior_my - 1)
+                I = np.clip(np.round((XLON - _prior_xlower) / _prior_dx).astype(int), 0, _prior_mx - 1)
+                PRIOR_GRID = prior_info.grid[J, I]
+                PRIOR_GRID = np.where(np.isfinite(PRIOR_GRID), PRIOR_GRID, 0.0)
+
+                # Floor to a tiny fraction of this prior's own max so a near-zero
+                # (but not out-of-bounds) prior cell can't zero out POST when a
+                # small sigma_s has collapsed LIKE to a single-cell spike there.
+                # LIKE's own peak cell is always exactly 1.0 (see log-space
+                # normalisation above), so flooring PRIOR_GRID alone is enough to
+                # guarantee POST.sum() > 0 without masking genuinely-zero priors
+                # over an entire grid (e.g. a broken/empty prior file).
+                _prior_floor_frac = getattr(params, 'prior_floor_frac', 1e-12)
+                _prior_max = np.nanmax(PRIOR_GRID)
+                if _prior_floor_frac > 0 and _prior_max > 0:
+                    PRIOR_GRID = np.maximum(PRIOR_GRID, _prior_floor_frac * _prior_max)
+
+            # Posterior  shape: (grid_width, grid_width)
+            POST = LIKE * PRIOR_GRID
+
+            # Best location
+            by, bx = np.unravel_index(np.argmax(POST), POST.shape)
+
+            t.best_location_post = float(POST[by, bx])
+            t.posterior_lon      = float(XLON[by, bx])
+            t.posterior_lat      = float(YLAT[by, bx])
+
+            _post_sum = POST.sum()
+            if _post_sum == 0:
+                raise ValueError("Sum of posterior probabilities is zero - check likelihood and prior!")
+            POST_norm = POST / _post_sum
+            _like_sum = LIKE.sum()
+            if _like_sum == 0:
+                raise ValueError("Sum of likelihood probabilities is zero - check likelihood calculation!")
+            LIKE_norm = LIKE / _like_sum
+
+            # Expectation (center of probability mass)
+            t.exp_lon = float(np.sum(XLON * POST_norm) )#/ _post_sum)
+            t.exp_lat = float(np.sum(YLAT * POST_norm) )# / _post_sum)
+
+            t.like_exp_lon = float(np.sum(XLON * LIKE_norm))
+            t.like_exp_lat = float(np.sum(YLAT * LIKE_norm))
+
+            t.best_misfit        = float(MISFITSQ[by, bx])
+            t.misfit_ave         = float(MISFIT_AVE[by, bx])
+            t.best_OT            = float(AVEOT[by, bx])
+            t.best_grid_x        = float(XX[by, bx])
+            t.best_grid_y        = float(YY[by, bx])
+            t.best_value         = float(POST[by, bx])
+            t.best_like          = float(LIKE[by, bx])
+            t.best_prior         = float(PRIOR_GRID[by, bx])
+            t.frac_misfit        = float(FRAC_MISFIT[by, bx])
+            t.best_depth         = float(evdepth)
+
+            # Scalar activity metrics at MAP location — derived from the per-grid-point
+            # mask computed above.  If the mask was disabled (no station_inventory),
+            # defaults to eligible so downstream code is unaffected.
+            if _ACTIVITY_FRAC_GRID is not None:
+                t.activity_frac     = float(_ACTIVITY_FRAC_GRID[by, bx])
+                t.activity_eligible = bool(t.activity_frac >= getattr(params, 'activity_threshold', 0.40))
+            else:
+                t.activity_eligible = True
+                t.activity_frac     = np.nan
 
         # ---- Post-location activity check (MAP-based, comment out to disable) ----
         # Alternative to the per-grid-point mask above.  Evaluates the activity
@@ -650,23 +719,33 @@ def E2Location_searchGrid(event, trigs, params):
         # t.activity_frac = activity_frac
         # ---- End post-location activity check --------------------------------
 
-        #Output DataFrame built from arrays (not row-by-row)
-        output_df = pd.DataFrame({
-            'y':                 YY.ravel(),
-            'x':                 XX.ravel(),
-            'lat':               YLAT.ravel(),
-            'lon':               XLON.ravel(),
-            'like':              LIKE.ravel(),
-            'prior':             PRIOR_GRID.ravel(),
-            'activity_eligible': t.activity_eligible,
-            'activity_frac':     t.activity_frac,
-            'post':              POST.ravel(),
-            'misfitrms':         MISFITSQ.ravel(),
-            'misfitave':         MISFIT_AVE.ravel(),
-            'misfitfrac':        FRAC_MISFIT.ravel(),
-        })
-                    
-    
+            #Output DataFrame built from arrays (not row-by-row)
+            output_df = pd.DataFrame({
+                'y':                 YY.ravel(),
+                'x':                 XX.ravel(),
+                'lat':               YLAT.ravel(),
+                'lon':               XLON.ravel(),
+                'like':              LIKE.ravel(),
+                'prior':             PRIOR_GRID.ravel(),
+                'activity_eligible': t.activity_eligible,
+                'activity_frac':     t.activity_frac,
+                'post':              POST.ravel(),
+                'misfitrms':         MISFITSQ.ravel(),
+                'misfitave':         MISFIT_AVE.ravel(),
+                'misfitfrac':        FRAC_MISFIT.ravel(),
+            })
+
+            # Keep this depth only if it's the best-supported one seen so
+            # far (see the note above the loop for why _depth_score, not
+            # t.best_location_post, is the comparison criterion).
+            if _depth_score > _best_depth_score:
+                _best_depth_score = _depth_score
+                _best_t = copy.copy(t)
+                _best_output_df = output_df
+
+        t = _best_t
+        output_df = _best_output_df
+
     print("best_location_post: "+str(np.round(t.best_location_post, 12)))
     print("posterior_lon: "+str(np.round(t.posterior_lon, 6)))
     print("posterior_lat: "+str(np.round(t.posterior_lat, 6)))
