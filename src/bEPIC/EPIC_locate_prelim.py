@@ -336,6 +336,7 @@ def E2Location_searchGrid(event, trigs, params):
     _prior_dy     = float(np.diff(prior_info.lats).mean())
     _prior_mx     = len(prior_info.lons)
     _prior_my     = len(prior_info.lats)
+    interp_method = 'bilinear' #change if needed
 
 
     lat0  = evlat;
@@ -445,7 +446,6 @@ def E2Location_searchGrid(event, trigs, params):
             STUDENT_NU = 1.0   # degrees of freedom; lower = heavier tails (nu->inf recovers Gaussian)
 
             # Likelihood  shape: (grid_width, grid_width)
-            # TODO - look at scaling the residual by uncertainty (or a distance proxy)
             # i.e., uncertainty proportional to distance
             SIGMA_S = getattr(params, 'sigma_s', 1.)
             SIG_TERM = -1/(2*SIGMA_S**2)
@@ -610,10 +610,32 @@ def E2Location_searchGrid(event, trigs, params):
             # Prior  shape: (grid_width, grid_width)
             PRIOR_GRID = np.ones_like(LIKE)
             if params.use_prior:
-                J = np.clip(np.round((YLAT - _prior_ylower) / _prior_dy).astype(int), 0, _prior_my - 1)
-                I = np.clip(np.round((XLON - _prior_xlower) / _prior_dx).astype(int), 0, _prior_mx - 1)
-                PRIOR_GRID = prior_info.grid[J, I]
-                PRIOR_GRID = np.where(np.isfinite(PRIOR_GRID), PRIOR_GRID, 0.0)
+                if interp_method == 'bilinear':
+                    # manual, vectorized bilinear interpolator. A full bilinear interpolator would have
+                    # to be built with scipy, so this is faster for this use case.
+                    fy = np.clip((YLAT - _prior_ylower) / _prior_dy, 0, _prior_my - 1)
+                    fx = np.clip((XLON - _prior_xlower) / _prior_dx, 0, _prior_mx - 1)
+
+                    j0 = np.floor(fy).astype(int); j1 = np.clip(j0 + 1, 0, _prior_my - 1)
+                    i0 = np.floor(fx).astype(int); i1 = np.clip(i0 + 1, 0, _prior_mx - 1)
+
+                    wy = fy - j0   # fractional weight, in [0, 1]
+                    wx = fx - i0
+
+                    Q11 = prior_info.grid[j0, i0]; Q12 = prior_info.grid[j0, i1]
+                    Q21 = prior_info.grid[j1, i0]; Q22 = prior_info.grid[j1, i1]
+
+                    PRIOR_GRID = ((1 - wy) * (1 - wx) * Q11 + (1 - wy) * wx * Q12 +
+                                wy * (1 - wx) * Q21 + wy * wx * Q22)
+                elif interp_method == 'nearest_neighbors':
+
+                    J = np.clip(np.round((YLAT - _prior_ylower) / _prior_dy).astype(int), 0, _prior_my - 1)
+                    I = np.clip(np.round((XLON - _prior_xlower) / _prior_dx).astype(int), 0, _prior_mx - 1)
+                    PRIOR_GRID = prior_info.grid[J, I]
+                    PRIOR_GRID = np.where(np.isfinite(PRIOR_GRID), PRIOR_GRID, 0.0)
+
+                else:
+                    raise Exception("param interp_method must be one of 'nearest_neighbors' or 'bilinear'. ")
 
                 # Floor to a tiny fraction of this prior's own max so a near-zero
                 # (but not out-of-bounds) prior cell can't zero out POST when a
@@ -808,7 +830,7 @@ def E2Location_searchGrid(event, trigs, params):
         #             tterror = trig_ot[it] - aveOT
         #             d = tterror*tterror
         #             e = np.exp(-0.5*d)
-        #             like *= e
+        #             like *= e\
         #         like = np.sqrt(like/num_trigs)
         #         post = like
         #         Prior = 1
