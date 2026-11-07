@@ -50,8 +50,9 @@ What this code needs as inputs:
     t contains the best grid location, prior value, misfit location, etc etc
     
     output_df is a dataframe that is grid n x grid m in length containing the output
-    information (misfit, likelihood, prior, post) for all grid nodes
-    
+    information (misfit, likelihood, prior, post) for all grid nodes.  It is None when there
+    are fewer than params.min_stations_grid_search distinct stations (no grid search then).
+
 
 Created on Fri Oct 31 13:24:40 2025
 @author: amy
@@ -211,8 +212,11 @@ class EPIC_PARAMS:
     def __init__(self):
         self.MAX_EVENT_TRIGS = 100
         self.LocationPVelocity = 6.0
-        self.migrate_grid = True             # if True, re-centre the search grid on the posterior MAP after each version
-        self.migrate_grid_min_triggers = 1   # only migrate once this many triggers have been reached
+        self.migrate_grid = True             # if True, re-centre the search grid on the location after each version
+        self.migrate_grid_min_stations = 1   # only re-centre once this many distinct STATIONS (not triggers) have reported; 1 = after every station
+        self.min_stations_grid_search = 1    # fewer distinct stations than this: no grid search.  1 station -> the station, 2 -> the point 2:1
+                                             # toward the first-triggered station, then the grid is centred there.  EPIC uses 3 (default 1 =
+                                             # always search, the original bEPIC behaviour).  Triggers all count equally; a station can have two.
         self.station_inventory  = None  # DataFrame with columns: station, network, longitude, latitude
                                         # None disables the activity check (default, fully backward-compatible)
         self.activity_threshold = 0.40  # min fraction triggered/(triggered+total inside R) to pass eligibility
@@ -231,6 +235,39 @@ def get_dist_between_two_points_km(lon1,lat1,lon2,lat2):
     return(d)
    
 ##########################################################################################
+
+
+def _station_location(event, trigs, params):
+    """
+    EPIC's location while there are too few stations for a grid search (fewer than params.min_stations_grid_search):
+    one station -> the station itself; two -> (2*first + second)/3, 2:1 toward the first-triggered station (the rule of
+    locate.get_two_station_location); more -> the mean of the stations.  There is no grid, so output_df is None.
+    The origin time is the mean over all triggers of trigger time minus the P travel time (every trigger counts equally).
+    """
+    first = {}                                                  # earliest trigger of each station
+    for tr in trigs:
+        key = (tr.net, tr.sta)
+        if key not in first or tr.time < first[key].time:
+            first[key] = tr
+    stations = sorted(first.values(), key=lambda tr: tr.time)   # first-triggered first
+    w = np.array([2/3, 1/3]) if len(stations) == 2 else np.full(len(stations), 1 / len(stations))
+    lat = float(np.dot(w, [tr.lat for tr in stations]))
+    lon = float(np.dot(w, [tr.lon for tr in stations]))
+
+    depth = event.depth
+    tt = _get_travel_time_function(depth)
+    dist = np.array([get_dist_between_two_points_km(lon, lat, tr.lon, tr.lat) for tr in trigs])
+    ot = np.array([tr.time for tr in trigs]) - tt(np.sqrt(dist**2 + depth**2))
+    res = ot - ot.mean()
+
+    t = SearchOut()
+    t.posterior_lat = t.exp_lat = t.like_lat = t.like_exp_lat = lat
+    t.posterior_lon = t.exp_lon = t.like_lon = t.like_exp_lon = lon
+    t.best_OT = float(ot.mean())
+    t.best_misfit = float(np.sqrt(np.mean(res**2)))
+    t.misfit_ave = float(np.mean(np.abs(res)))
+    t.best_depth = depth
+    return t, None
 
 
 def E2Location_locate(params,event):
@@ -252,8 +289,15 @@ def E2Location_locate(params,event):
     # // MULTI STATION LOCATION
     event = latLonToXY(event) 
     trigs = event.trigs
-     
-    t,output_df = E2Location_searchGrid(event,trigs, params)
+
+    # Stations, not triggers, decide what EPIC does: below min_stations_grid_search it only places the event at the
+    # station / between the two stations (output_df is then None); from there on it searches the grid.
+    used = trigs[:params.MAX_EVENT_TRIGS]
+    n_stations = len({(tr.net, tr.sta) for tr in used})
+    if n_stations < getattr(params, 'min_stations_grid_search', 1):
+        t, output_df = _station_location(event, used, params)
+    else:
+        t, output_df = E2Location_searchGrid(event,trigs, params)
     
     # TODO - test 'exp'
     location_type = 'map' # 'map or 'exp' - recenter on only one of them.
@@ -297,10 +341,10 @@ def E2Location_locate(params,event):
               +'\t'+str(np.round(trigs[i].tt,2)))
     print('# --------------------------------------------------------')
 
-    # Optionally re-centre the search grid on the posterior MAP for the next version.
-    # Migration is suppressed until migrate_grid_min_triggers stations have reported.
+    # Optionally re-centre the search grid on the location for the next version (the station, the two-station point,
+    # or the posterior MAP).  Migration is suppressed until migrate_grid_min_stations distinct stations have reported.
     if (getattr(params, 'migrate_grid', True) and
-            num_trigs >= getattr(params, 'migrate_grid_min_triggers', 1)):
+            n_stations >= getattr(params, 'migrate_grid_min_stations', 1)):
         event.lat = evlat
         event.lon = evlon
 
@@ -413,16 +457,16 @@ def E2Location_searchGrid(event, trigs, params):
             # Reduces sensitivity to outlier picks that currently poison AVEOT and
             # shift the entire likelihood surface.
             #
-            # Set trim_frac = 0.0 to recover the original straight mean.
-            USE_ROBUST_OT = True
-            trim_frac     = 0.1   # fraction trimmed from each tail (0.0–0.49)
-            # Mean origin time per grid point  shape: (grid_width, grid_width)
-            if USE_ROBUST_OT and num_trigs >= 4:
-                k = max(1, int(np.floor(trim_frac * num_trigs)))
-                OT_sorted = np.sort(TRIG_OT, axis=2)
-                AVEOT = OT_sorted[:, :, k:-k].mean(axis=2)   # trimmed mean
-            else:
-                AVEOT = TRIG_OT.mean(axis=2)                  # original
+            # # Set trim_frac = 0.0 to recover the original straight mean.
+            # USE_ROBUST_OT = False
+            # trim_frac     = 0.1   # fraction trimmed from each tail (0.0–0.49)
+            # # Mean origin time per grid point  shape: (grid_width, grid_width)
+            # if USE_ROBUST_OT and num_trigs >= 8:
+            #     k = max(1, int(np.floor(trim_frac * num_trigs)))
+            #     OT_sorted = np.sort(TRIG_OT, axis=2)
+            #     AVEOT = OT_sorted[:, :, k:-k].mean(axis=2)   # trimmed mean
+            # else:
+            AVEOT = TRIG_OT.mean(axis=2)                  # original
             #################################################################
 
             # Residuals  shape: (grid_width, grid_width, num_trigs)
@@ -481,7 +525,7 @@ def E2Location_searchGrid(event, trigs, params):
             #
             # Kernel choice mirrors Change 2: Cauchy if USE_CAUCHY, else Gaussian.
             # DTT_SIGMA_S controls the residual scale (seconds); tune to your network.
-            USE_DTT    = True
+            USE_DTT    = False
             DTT_WEIGHT = getattr(params,'dtt_weight',0.5)
             if DTT_WEIGHT < 0.00001:
                 print("DTT_weight too small - skipping DTT.")
@@ -491,56 +535,56 @@ def E2Location_searchGrid(event, trigs, params):
             #print("EDT_SIGMA_S within E2Locaiton_searchGrid(): ",EDT_SIGMA_S)
             #print("DTT_WEIGHT in E2Location_searchGrid: ",DTT_WEIGHT)
 
-            if USE_DTT and num_trigs >= 2:
+            # if USE_DTT and num_trigs >= 2:
 
-                # METH_EDT likelihood — replace the LIKE_DTT block inside USE_DTT
-                #----------------------------------------
-                #Variables already available: ii, jj, obs_dtt, pred_dtt, trig_times, STT
-                ii, jj    = np.triu_indices(num_trigs, k=1)
-                # Get the differnece in observed trigerr times between stations ii and jj
-                obs_dtt   = trig_times[ii] - trig_times[jj]
-                # get the difference in predicted travel times between stations ii and jj from the lookup table
-                pred_dtt  = STT[:, :, ii]  - STT[:, :, jj]
-
-
-
-                # Use per-station tterror if populated, otherwise fall back to uniform sigma
-                sigma_arr = np.array([trigs[it].tterror for it in range(num_trigs)])
-                if not np.all(np.isfinite(sigma_arr)):
-                    sigma_arr = np.full(num_trigs, EDT_SIGMA_S)
+            #     # METH_EDT likelihood — replace the LIKE_DTT block inside USE_DTT
+            #     #----------------------------------------
+            #     #Variables already available: ii, jj, obs_dtt, pred_dtt, trig_times, STT
+            #     ii, jj    = np.triu_indices(num_trigs, k=1)
+            #     # Get the differnece in observed trigerr times between stations ii and jj
+            #     obs_dtt   = trig_times[ii] - trig_times[jj]
+            #     # get the difference in predicted travel times between stations ii and jj from the lookup table
+            #     pred_dtt  = STT[:, :, ii]  - STT[:, :, jj]
 
 
 
+            #     # Use per-station tterror if populated, otherwise fall back to uniform sigma
+            #     sigma_arr = np.array([trigs[it].tterror for it in range(num_trigs)])
+            #     if not np.all(np.isfinite(sigma_arr)):
+            #         sigma_arr = np.full(num_trigs, EDT_SIGMA_S)
 
-                # Per-pair combined variance and weight  shape: (n_pairs,)
-                sig2_pair = sigma_arr[ii]**2 + sigma_arr[jj]**2
-                w_ij      = 1.0 / np.sqrt(sig2_pair)
-                log_w    = np.log(w_ij)
 
 
-                # Raw DTT residuals  shape: (grid_width, grid_width, n_pairs)
-                eps_ij = obs_dtt - pred_dtt   # obs_dtt broadcasts from (n_pairs,) against pred_dtt
 
-                # Gaussian probability per pair  shape: (grid_width, grid_width, n_pairs)
-                log_p_ij = -eps_ij**2 / (2.0 * sig2_pair)
-                #p_ij = np.exp(-eps_ij**2 / (2.0 * sig2_pair))
+            #     # Per-pair combined variance and weight  shape: (n_pairs,)
+            #     sig2_pair = sigma_arr[ii]**2 + sigma_arr[jj]**2
+            #     w_ij      = 1.0 / np.sqrt(sig2_pair)
+            #     log_w    = np.log(w_ij)
 
-                # METH_EDT: weighted sum, normalised so the surface integrates comparably across versions
-                #LIKE_EDT = (w_ij * p_ij).sum(axis=2) / w_ij.sum()   # shape: (grid_width, grid_width)
-                LOG_LIKE_EDT = logsumexp(log_p_ij + log_w, axis=2) - np.log(w_ij.sum())
 
-                # Blend the raw (pre-normalisation) OT and EDT log-likelihood
-                # peaks for the cross-depth score, using each term's own
-                # argmax as an approximation of the true combined surface's
-                # argmax (exact only when both terms peak at the same grid
-                # cell -- close enough for a coarse depth search).
-                _depth_score = (1.0 - DTT_WEIGHT) * _depth_score + DTT_WEIGHT * float(np.nanmax(LOG_LIKE_EDT))
+            #     # Raw DTT residuals  shape: (grid_width, grid_width, n_pairs)
+            #     eps_ij = obs_dtt - pred_dtt   # obs_dtt broadcasts from (n_pairs,) against pred_dtt
 
-                LIKE_EDT = np.exp(LOG_LIKE_EDT - LOG_LIKE_EDT.max())
+            #     # Gaussian probability per pair  shape: (grid_width, grid_width, n_pairs)
+            #     log_p_ij = -eps_ij**2 / (2.0 * sig2_pair)
+            #     #p_ij = np.exp(-eps_ij**2 / (2.0 * sig2_pair))
 
-                #Then in your blend line (currently line 572), replace LIKE_DTT with LIKE_EDT:
-                LIKE = (LIKE ** (1.0 - DTT_WEIGHT)) * (LIKE_EDT ** DTT_WEIGHT)
-                #----------------------------------------
+            #     # METH_EDT: weighted sum, normalised so the surface integrates comparably across versions
+            #     #LIKE_EDT = (w_ij * p_ij).sum(axis=2) / w_ij.sum()   # shape: (grid_width, grid_width)
+            #     LOG_LIKE_EDT = logsumexp(log_p_ij + log_w, axis=2) - np.log(w_ij.sum())
+
+            #     # Blend the raw (pre-normalisation) OT and EDT log-likelihood
+            #     # peaks for the cross-depth score, using each term's own
+            #     # argmax as an approximation of the true combined surface's
+            #     # argmax (exact only when both terms peak at the same grid
+            #     # cell -- close enough for a coarse depth search).
+            #     _depth_score = (1.0 - DTT_WEIGHT) * _depth_score + DTT_WEIGHT * float(np.nanmax(LOG_LIKE_EDT))
+
+            #     LIKE_EDT = np.exp(LOG_LIKE_EDT - LOG_LIKE_EDT.max())
+
+            #     #Then in your blend line (currently line 572), replace LIKE_DTT with LIKE_EDT:
+            #     LIKE = (LIKE ** (1.0 - DTT_WEIGHT)) * (LIKE_EDT ** DTT_WEIGHT)
+            #     #----------------------------------------
 
             # Optional - zero-out the likelihood low values (<1% of the max)
             _floor_value = getattr(params, "floor_value", 0.)
